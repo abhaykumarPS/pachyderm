@@ -3,13 +3,13 @@ package dbutil
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgconn"
-	"github.com/jmoiron/sqlx"
 	"github.com/pachyderm/pachyderm/v2/src/internal/backoff"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
@@ -109,7 +109,7 @@ func WithBackOff(bo backoff.BackOff) WithTxOption {
 // WithTx calls cb with a transaction,
 // The transaction is committed IFF cb returns nil.
 // If cb returns an error the transaction is rolled back.
-func WithTx(ctx context.Context, db *sqlx.DB, cb func(tx *sqlx.Tx) error, opts ...WithTxOption) error {
+func WithTx(ctx context.Context, db *pachsql.DB, cb func(tx *pachsql.Tx) error, opts ...WithTxOption) error {
 	backoffStrategy := backoff.NewExponentialBackOff()
 	backoffStrategy.InitialInterval = 1 * time.Millisecond
 	backoffStrategy.MaxElapsedTime = 0
@@ -142,7 +142,7 @@ func WithTx(ctx context.Context, db *sqlx.DB, cb func(tx *sqlx.Tx) error, opts .
 		tx, err := db.BeginTxx(ctx, &c.TxOptions)
 		if err != nil {
 			underlyingTxFinishMetric.WithLabelValues("failed_start").Inc()
-			return err
+			return errors.EnsureStack(err)
 		}
 		return tryTxFunc(tx, cb)
 	}, c.BackOff, func(err error, _ time.Duration) error {
@@ -164,7 +164,7 @@ func WithTx(ctx context.Context, db *sqlx.DB, cb func(tx *sqlx.Tx) error, opts .
 	return nil
 }
 
-func tryTxFunc(tx *sqlx.Tx, cb func(tx *sqlx.Tx) error) error {
+func tryTxFunc(tx *pachsql.Tx, cb func(tx *pachsql.Tx) error) error {
 	if err := cb(tx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			underlyingTxFinishMetric.WithLabelValues("rollback_failed").Inc()
@@ -176,7 +176,7 @@ func tryTxFunc(tx *sqlx.Tx, cb func(tx *sqlx.Tx) error) error {
 	}
 	if err := tx.Commit(); err != nil {
 		underlyingTxFinishMetric.WithLabelValues("commit_failed").Inc()
-		return err
+		return errors.EnsureStack(err)
 	}
 	underlyingTxFinishMetric.WithLabelValues("commit_ok").Inc()
 	return nil

@@ -3,6 +3,7 @@ package server
 import (
 	"github.com/pachyderm/pachyderm/v2/src/client"
 	col "github.com/pachyderm/pachyderm/v2/src/internal/collection"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/ppsdb"
 	"github.com/pachyderm/pachyderm/v2/src/internal/ppsutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/transactionenv/txncontext"
@@ -73,7 +74,7 @@ func (t *JobStopper) Run() error {
 			if err := t.a.jobs.ReadWrite(t.txnCtx.SqlTx).GetByIndex(ppsdb.JobsJobSetIndex, commitset.ID, jobInfo, col.DefaultOptions(), func(string) error {
 				return t.a.stopJob(t.txnCtx, jobInfo.Job, "output commit removed")
 			}); err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 		}
 	}
@@ -102,6 +103,9 @@ func (jf *JobFinisher) Run() error {
 		pipelines := jf.a.pipelines.ReadWrite(jf.txnCtx.SqlTx)
 		jobs := jf.a.jobs.ReadWrite(jf.txnCtx.SqlTx)
 		for _, commitInfo := range jf.commitInfos {
+			if commitInfo.Commit.Branch.Repo.Type != pfs.UserRepoType {
+				continue
+			}
 			jobKey := ppsdb.JobKey(client.NewJob(commitInfo.Commit.Branch.Repo.Name, commitInfo.Commit.ID))
 			jobInfo := &pps.JobInfo{}
 			if err := jobs.Get(jobKey, jobInfo); err != nil {
@@ -109,7 +113,7 @@ func (jf *JobFinisher) Run() error {
 				if col.IsErrNotFound(err) {
 					continue
 				}
-				return err
+				return errors.EnsureStack(err)
 			}
 			if jobInfo.State != pps.JobState_JOB_FINISHING {
 				return nil

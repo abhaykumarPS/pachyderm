@@ -1,3 +1,6 @@
+//nolint:wrapcheck
+// TODO: the s2 library checks the type of the error to decide how to handle it,
+// which doesn't work properly with wrapped errors
 package s3
 
 import (
@@ -67,7 +70,7 @@ func (c *controller) requestClient(r *http.Request) (*client.APIClient, error) {
 		}
 	}
 
-	return pc, nil
+	return pc.WithCtx(r.Context()), nil
 }
 
 // Router creates an http server like object that serves an S3-like API for PFS. This allows you to

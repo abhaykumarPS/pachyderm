@@ -1,12 +1,17 @@
 package dbutil
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v4/stdlib"
 	"github.com/jmoiron/sqlx"
+	"github.com/pachyderm/pachyderm/v2/src/internal/backoff"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -34,7 +39,7 @@ type dbConfig struct {
 	maxIdleConns    int
 	connMaxLifetime time.Duration
 	connMaxIdleTime time.Duration
-	driver          string
+	sslMode         string
 }
 
 func newConfig(opts ...Option) *dbConfig {
@@ -43,7 +48,7 @@ func newConfig(opts ...Option) *dbConfig {
 		maxIdleConns:    DefaultMaxIdleConns,
 		connMaxLifetime: DefaultConnMaxLifetime,
 		connMaxIdleTime: DefaultConnMaxIdleTime,
-		driver:          "pgx",
+		sslMode:         DefaultSSLMode,
 	}
 	for _, opt := range opts {
 		opt(dbc)
@@ -53,8 +58,8 @@ func newConfig(opts ...Option) *dbConfig {
 
 func getDSN(dbc *dbConfig) string {
 	fields := map[string]string{
-		"sslmode":         "disable",
 		"connect_timeout": "30",
+		"sslmode":         dbc.sslMode,
 
 		// https://github.com/jackc/pgx/issues/650#issuecomment-568212888
 		// both of the options below are mentioned as solutions for working with pg_bouncer
@@ -94,7 +99,7 @@ func GetDSN(opts ...Option) string {
 }
 
 // NewDB creates a new DB.
-func NewDB(opts ...Option) (*sqlx.DB, error) {
+func NewDB(opts ...Option) (*pachsql.DB, error) {
 	dbc := newConfig(opts...)
 	if dbc.name == "" {
 		panic("must specify database name")
@@ -108,7 +113,7 @@ func NewDB(opts ...Option) (*sqlx.DB, error) {
 	dsn := getDSN(dbc)
 	db, err := sqlx.Open("pgx", dsn)
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	if dbc.maxOpenConns != 0 {
 		db.SetMaxOpenConns(dbc.maxOpenConns)
@@ -118,4 +123,23 @@ func NewDB(opts ...Option) (*sqlx.DB, error) {
 	db.SetConnMaxLifetime(dbc.connMaxLifetime)
 	db.SetConnMaxIdleTime(dbc.connMaxIdleTime)
 	return db, nil
+}
+
+// WaitUntilReady attempts to ping the database until the context is cancelled.
+// Progress information is written to log
+func WaitUntilReady(ctx context.Context, log *logrus.Logger, db *pachsql.DB) error {
+	const period = time.Second
+	const timeout = time.Second
+	log.Infof("waiting for db to be ready...")
+	return backoff.RetryUntilCancel(ctx, func() error {
+		log.Debugf("pinging db...")
+		ctx, cf := context.WithTimeout(ctx, timeout)
+		defer cf()
+		if err := db.PingContext(ctx); err != nil {
+			log.Infof("db is not ready: %v", err)
+			return errors.EnsureStack(err)
+		}
+		log.Infof("db is ready")
+		return nil
+	}, backoff.NewConstantBackOff(period), nil)
 }

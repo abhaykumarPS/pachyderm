@@ -3,6 +3,7 @@ package fileset
 import (
 	"context"
 	"io"
+	"math"
 	"time"
 
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
@@ -22,11 +23,12 @@ type UnorderedWriter struct {
 	ids                        []ID
 	getParentID                func() (*ID, error)
 	validator                  func(string) error
+	maxFanIn                   int
 }
 
 func newUnorderedWriter(ctx context.Context, storage *Storage, memThreshold int64, opts ...UnorderedWriterOption) (*UnorderedWriter, error) {
 	if err := storage.filesetSem.Acquire(ctx, 1); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	// Half of the memory will be for buffering in the unordered writer.
 	// The other half will be for buffering in the chunk writer.
@@ -37,6 +39,7 @@ func newUnorderedWriter(ctx context.Context, storage *Storage, memThreshold int6
 		memAvailable: memThreshold,
 		memThreshold: memThreshold,
 		buffer:       NewBuffer(),
+		maxFanIn:     math.MaxInt32,
 	}
 	for _, opt := range opts {
 		opt(uw)
@@ -62,7 +65,7 @@ func (uw *UnorderedWriter) Put(p, datum string, appendFile bool, r io.Reader) (r
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return err
+			return errors.EnsureStack(err)
 		}
 		if uw.memAvailable == 0 {
 			if err := uw.serialize(); err != nil {
@@ -114,7 +117,9 @@ func (uw *UnorderedWriter) withWriter(cb func(*Writer) error) error {
 	}
 	uw.ids = append(uw.ids, *id)
 	if uw.renewer != nil {
-		uw.renewer.Add(*id)
+		if err := uw.renewer.Add(uw.ctx, *id); err != nil {
+			return err
+		}
 	}
 	// Reset fileset buffer.
 	uw.buffer = NewBuffer()
@@ -146,9 +151,10 @@ func (uw *UnorderedWriter) Delete(p, datum string) error {
 		if err != nil {
 			return err
 		}
-		return fs.Iterate(uw.ctx, func(f File) error {
+		err = fs.Iterate(uw.ctx, func(f File) error {
 			return uw.Delete(f.Index().Path, datum)
 		})
+		return errors.EnsureStack(err)
 	}
 	uw.buffer.Delete(p, datum)
 	return nil
@@ -162,7 +168,7 @@ func (uw *UnorderedWriter) Copy(ctx context.Context, fs FileSet, datum string, a
 		datum = DefaultFileDatum
 	}
 	return uw.withWriter(func(w *Writer) error {
-		return fs.Iterate(ctx, func(f File) error {
+		err := fs.Iterate(ctx, func(f File) error {
 			if !appendFile {
 				if err := w.Delete(f.Index().Path, datum); err != nil {
 					return err
@@ -170,6 +176,7 @@ func (uw *UnorderedWriter) Copy(ctx context.Context, fs FileSet, datum string, a
 			}
 			return w.Copy(f, datum)
 		})
+		return errors.EnsureStack(err)
 	})
 }
 
@@ -179,7 +186,34 @@ func (uw *UnorderedWriter) Close() (*ID, error) {
 	if err := uw.serialize(); err != nil {
 		return nil, err
 	}
+	if err := uw.compact(); err != nil {
+		return nil, err
+	}
 	return uw.storage.newComposite(uw.ctx, &Composite{
 		Layers: idsToHex(uw.ids),
 	}, uw.ttl)
+}
+
+func (uw *UnorderedWriter) compact() error {
+	for len(uw.ids) > uw.maxFanIn {
+		var ids []ID
+		for start := 0; start < len(uw.ids); start += int(uw.maxFanIn) {
+			end := start + int(uw.maxFanIn)
+			if end > len(uw.ids) {
+				end = len(uw.ids)
+			}
+			id, err := uw.storage.Compact(uw.ctx, uw.ids[start:end], uw.ttl)
+			if err != nil {
+				return err
+			}
+			if uw.renewer != nil {
+				if err := uw.renewer.Add(uw.ctx, *id); err != nil {
+					return err
+				}
+			}
+			ids = append(ids, *id)
+		}
+		uw.ids = ids
+	}
+	return nil
 }

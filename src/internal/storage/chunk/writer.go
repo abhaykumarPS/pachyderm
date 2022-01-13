@@ -6,6 +6,8 @@ import (
 
 	"github.com/chmduquesne/rollinghash/buzhash64"
 	units "github.com/docker/go-units"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/miscutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/kv"
 )
 
@@ -52,6 +54,7 @@ type chunkSize struct {
 type Writer struct {
 	client     Client
 	memCache   kv.GetPut
+	deduper    *miscutil.WorkDeduper
 	cb         WriterCallback
 	chunkSize  *chunkSize
 	splitMask  uint64
@@ -71,12 +74,13 @@ type Writer struct {
 	first, last             bool
 }
 
-func newWriter(ctx context.Context, client Client, memCache kv.GetPut, createOpts CreateOptions, cb WriterCallback, opts ...WriterOption) *Writer {
+func newWriter(ctx context.Context, client Client, memCache kv.GetPut, deduper *miscutil.WorkDeduper, createOpts CreateOptions, cb WriterCallback, opts ...WriterOption) *Writer {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	w := &Writer{
 		cb:         cb,
 		client:     client,
 		memCache:   memCache,
+		deduper:    deduper,
 		createOpts: createOpts,
 		ctx:        cancelCtx,
 		cancel:     cancel,
@@ -86,7 +90,8 @@ func newWriter(ctx context.Context, client Client, memCache kv.GetPut, createOpt
 		},
 		buf:   &bytes.Buffer{},
 		stats: &stats{},
-		chain: NewTaskChain(cancelCtx),
+		// TODO: Make task chain parallelism configurable?
+		chain: NewTaskChain(cancelCtx, 100),
 		first: true,
 	}
 	WithRollingHashConfig(defaultAverageBits, defaultSeed)(w)
@@ -154,7 +159,7 @@ func (w *Writer) maybeDone(cb func() error) (retErr error) {
 	}()
 	select {
 	case <-w.ctx.Done():
-		return w.ctx.Err()
+		return errors.EnsureStack(w.ctx.Err())
 	default:
 	}
 	return cb()
@@ -265,7 +270,8 @@ func (w *Writer) maybeUpload(ctx context.Context, chunkBytes []byte, pointsTo []
 		}
 	} else {
 		createFunc = func(ctx context.Context, data []byte) (ID, error) {
-			return w.client.Create(ctx, md, data)
+			res, err := w.client.Create(ctx, md, data)
+			return res, errors.EnsureStack(err)
 		}
 	}
 	return Create(ctx, CreateOptions{}, chunkBytes, createFunc)
@@ -393,7 +399,7 @@ func (w *Writer) flushBuffer() error {
 
 func (w *Writer) flushDataRef(dataRef *DataRef) error {
 	buf := &bytes.Buffer{}
-	r := newDataReader(w.ctx, w.client, w.memCache, dataRef, 0)
+	r := newDataReader(w.ctx, w.client, w.memCache, w.deduper, dataRef, 0)
 	if err := r.Get(buf); err != nil {
 		return err
 	}

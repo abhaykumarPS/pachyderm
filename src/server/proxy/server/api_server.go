@@ -1,31 +1,33 @@
 package server
 
 import (
-	"errors"
-
 	"github.com/pachyderm/pachyderm/v2/src/internal/collection"
-	col "github.com/pachyderm/pachyderm/v2/src/internal/collection"
-	"github.com/pachyderm/pachyderm/v2/src/internal/serviceenv"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/uuid"
 	"github.com/pachyderm/pachyderm/v2/src/proxy"
 	"github.com/sirupsen/logrus"
 )
 
-type APIServer struct {
-	env serviceenv.ServiceEnv
+// Env is the set of dependencies required for APIServer
+type Env struct {
+	Listener collection.PostgresListener
 }
 
-func NewAPIServer(env serviceenv.ServiceEnv) *APIServer {
+type APIServer struct {
+	env Env
+}
+
+func NewAPIServer(env Env) *APIServer {
 	return &APIServer{
 		env: env,
 	}
 }
 
 func (a *APIServer) Listen(request *proxy.ListenRequest, server proxy.API_ListenServer) (retErr error) {
-	listener := a.env.GetPostgresListener()
+	listener := a.env.Listener
 	notifier := newNotifier(server, request.Channel)
 	if err := listener.Register(notifier); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	defer func() {
 		if err := listener.Unregister(notifier); err != nil {
@@ -48,7 +50,7 @@ func newNotifier(server proxy.API_ListenServer, channel string) *notifier {
 		server:  server,
 		id:      uuid.NewWithoutDashes(),
 		channel: channel,
-		bufChan: make(chan *collection.Notification, col.ChannelBufferSize),
+		bufChan: make(chan *collection.Notification, collection.ChannelBufferSize),
 		errChan: make(chan error, 1),
 	}
 	go n.send()

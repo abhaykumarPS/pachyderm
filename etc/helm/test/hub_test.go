@@ -9,7 +9,7 @@ import (
 	"github.com/gruntwork-io/terratest/modules/helm"
 	appsV1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/networking/v1beta1"
+	netV1 "k8s.io/api/networking/v1"
 )
 
 func TestHub(t *testing.T) {
@@ -17,7 +17,7 @@ func TestHub(t *testing.T) {
 		objects []interface{}
 		checks  = map[string]bool{
 			"ingress":                             false,
-			"metricsEndpoint":                     false,
+			"metrics endpoint":                    false,
 			"console limits":                      false,
 			"etcd limits":                         false,
 			"loki logging":                        false,
@@ -43,7 +43,7 @@ func TestHub(t *testing.T) {
 	}
 	for _, object := range objects {
 		switch object := object.(type) {
-		case *v1beta1.Ingress:
+		case *netV1.Ingress:
 			for _, rule := range object.Spec.Rules {
 				if rule.Host == "console.test" {
 					checks["ingress"] = true
@@ -78,7 +78,7 @@ func TestHub(t *testing.T) {
 							if v.Value != expected {
 								t.Errorf("metrics endpoint %q ≠ %q", v.Value, expected)
 							}
-							checks["metricsEndpoint"] = true
+							checks["metrics endpoint"] = true
 						case "LOKI_LOGGING":
 							if v.Value != "true" {
 								t.Error("Loki logging should be enabled")

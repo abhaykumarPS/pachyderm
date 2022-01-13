@@ -2,14 +2,14 @@ package pfsload
 
 import (
 	"context"
-	"errors"
 	"io"
 	"math/rand"
 	"time"
 
 	"github.com/pachyderm/pachyderm/v2/src/client"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/miscutil"
 	"github.com/pachyderm/pachyderm/v2/src/pfs"
-	"modernc.org/mathutil"
 )
 
 // Client is the standard interface for a load testing client.
@@ -69,13 +69,14 @@ func NewThroughputLimitClient(client Client, spec *ThroughputSpec, random *rand.
 }
 
 func (tlc *throughputLimitClient) WithModifyFileClient(ctx context.Context, commit *pfs.Commit, cb func(client.ModifyFile) error) error {
-	return tlc.Client.WithModifyFileClient(ctx, commit, func(mf client.ModifyFile) error {
+	err := tlc.Client.WithModifyFileClient(ctx, commit, func(mf client.ModifyFile) error {
 		return cb(&throughputLimitModifyFileClient{
 			ModifyFile: mf,
 			spec:       tlc.spec,
 			random:     tlc.random,
 		})
 	})
+	return errors.EnsureStack(err)
 }
 
 type throughputLimitModifyFileClient struct {
@@ -91,7 +92,7 @@ func (tlmfc *throughputLimitModifyFileClient) PutFile(path string, r io.Reader, 
 			bytesPerSecond: tlmfc.spec.Limit,
 		}
 	}
-	return tlmfc.ModifyFile.PutFile(path, r, opts...)
+	return errors.EnsureStack(tlmfc.ModifyFile.PutFile(path, r, opts...))
 }
 
 type throughputLimitReader struct {
@@ -102,13 +103,13 @@ type throughputLimitReader struct {
 func (tlr *throughputLimitReader) Read(data []byte) (int, error) {
 	var bytesRead int
 	for len(data) > 0 {
-		size := mathutil.Min(len(data), tlr.bytesPerSecond-tlr.bytesSinceSleep)
+		size := miscutil.Min(len(data), tlr.bytesPerSecond-tlr.bytesSinceSleep)
 		n, err := tlr.r.Read(data[:size])
 		data = data[n:]
 		bytesRead += n
 		tlr.bytesSinceSleep += n
 		if err != nil {
-			return bytesRead, err
+			return bytesRead, errors.EnsureStack(err)
 		}
 		if tlr.bytesSinceSleep == tlr.bytesPerSecond {
 			time.Sleep(time.Second)
@@ -156,7 +157,8 @@ func (cc *cancelClient) WithModifyFileClient(ctx context.Context, commit *pfs.Co
 		}()
 		ctx = cancelCtx
 	}
-	return cc.Client.WithModifyFileClient(ctx, commit, func(mf client.ModifyFile) error {
+	err := cc.Client.WithModifyFileClient(ctx, commit, func(mf client.ModifyFile) error {
 		return cb(mf)
 	})
+	return errors.EnsureStack(err)
 }

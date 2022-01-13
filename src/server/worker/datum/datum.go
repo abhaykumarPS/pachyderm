@@ -63,7 +63,7 @@ func CreateSets(dit Iterator, storageRoot string, setSpec *SetSpec, upload func(
 		}
 		return nil
 	}); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	if len(metas) > 0 {
 		return createSet(metas, storageRoot, upload)
@@ -117,16 +117,16 @@ func createSet(metas []*Meta, storageRoot string, upload func(func(client.Modify
 
 // Set manages a set of datums.
 type Set struct {
-	pachClient                        *client.APIClient
+	cacheClient                       *pfssync.CacheClient
 	storageRoot                       string
 	metaOutputClient, pfsOutputClient client.ModifyFile
 	stats                             *Stats
 }
 
 // WithSet provides a scoped environment for a datum set.
-func WithSet(pachClient *client.APIClient, storageRoot string, cb func(*Set) error, opts ...SetOption) (retErr error) {
+func WithSet(cacheClient *pfssync.CacheClient, storageRoot string, cb func(*Set) error, opts ...SetOption) (retErr error) {
 	s := &Set{
-		pachClient:  pachClient,
+		cacheClient: cacheClient,
 		storageRoot: storageRoot,
 		stats:       &Stats{ProcessStats: &pps.ProcessStats{}},
 	}
@@ -186,6 +186,7 @@ type Datum struct {
 	numRetries       int
 	recoveryCallback func(context.Context) error
 	timeout          time.Duration
+	IDPrefix         string
 }
 
 func newDatum(set *Set, meta *Meta, opts ...Option) *Datum {
@@ -251,7 +252,7 @@ func (d *Datum) withData(cb func() error) (retErr error) {
 			retErr = errors.EnsureStack(err)
 		}
 	}()
-	return pfssync.WithDownloader(d.set.pachClient, func(downloader pfssync.Downloader) error {
+	return pfssync.WithDownloader(d.set.cacheClient, func(downloader pfssync.Downloader) error {
 		// TODO: Move to copy file for inputs to datum file set.
 		if err := d.downloadData(downloader); err != nil {
 			return err
@@ -291,7 +292,7 @@ func (d *Datum) downloadData(downloader pfssync.Downloader) error {
 			opts = append(opts, pfssync.WithEmpty())
 		}
 		if err := downloader.Download(path.Join(d.PFSStorageRoot(), input.Name), input.FileInfo.File, opts...); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	return nil
@@ -349,10 +350,11 @@ func (d *Datum) uploadMetaFile(mf client.ModifyFile) error {
 	marshaler := &jsonpb.Marshaler{}
 	buf := &bytes.Buffer{}
 	if err := marshaler.Marshal(buf, d.meta); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
-	fullPath := path.Join(MetaPrefix, d.ID, MetaFileName)
-	return mf.PutFile(fullPath, buf, client.WithAppendPutFile(), client.WithDatumPutFile(d.ID))
+	fullPath := path.Join(MetaPrefix, d.IDPrefix+d.ID, MetaFileName)
+	err := mf.PutFile(fullPath, buf, client.WithAppendPutFile(), client.WithDatumPutFile(d.ID))
+	return errors.EnsureStack(err)
 }
 
 func (d *Datum) uploadOutput() error {
@@ -391,7 +393,8 @@ func (d *Datum) upload(mf client.ModifyFile, storageRoot string, cb ...func(*tar
 		}
 		return tarutil.Export(storageRoot, bufW, opts...)
 	}, func(r io.Reader) error {
-		return mf.PutFileTAR(r, client.WithAppendPutFile(), client.WithDatumPutFile(d.ID))
+		err := mf.PutFileTAR(r, client.WithAppendPutFile(), client.WithDatumPutFile(d.ID))
+		return errors.EnsureStack(err)
 	}); err != nil {
 		return err
 	}
@@ -399,7 +402,7 @@ func (d *Datum) upload(mf client.ModifyFile, storageRoot string, cb ...func(*tar
 }
 
 func (d *Datum) handleSymlinks(mf client.ModifyFile, storageRoot string) error {
-	return filepath.Walk(storageRoot, func(file string, fi os.FileInfo, err error) (retErr error) {
+	err := filepath.Walk(storageRoot, func(file string, fi os.FileInfo, err error) (retErr error) {
 		if err != nil {
 			return err
 		}
@@ -411,15 +414,15 @@ func (d *Datum) handleSymlinks(mf client.ModifyFile, storageRoot string) error {
 		}
 		dstPath, err := filepath.Rel(storageRoot, file)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		file, err = os.Readlink(file)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		fi, err = os.Stat(file)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		if fi.Mode()&os.ModeNamedPipe != 0 {
 			return nil
@@ -430,7 +433,7 @@ func (d *Datum) handleSymlinks(mf client.ModifyFile, storageRoot string) error {
 		}
 		relPath, err := filepath.Rel(d.PFSStorageRoot(), file)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		pathSplit := strings.Split(relPath, string(os.PathSeparator))
 		var input *common.Input
@@ -445,26 +448,27 @@ func (d *Datum) handleSymlinks(mf client.ModifyFile, storageRoot string) error {
 		}
 		srcFile := proto.Clone(input.FileInfo.File).(*pfs.File)
 		srcFile.Path = path.Join(pathSplit[1:]...)
-		return mf.CopyFile(dstPath, srcFile, client.WithDatumCopyFile(d.ID))
+		return errors.EnsureStack(mf.CopyFile(dstPath, srcFile, client.WithDatumCopyFile(d.ID)))
 	})
+	return errors.EnsureStack(err)
 }
 
 func (d *Datum) uploadSymlink(mf client.ModifyFile, dstPath, file string, fi os.FileInfo) error {
 	cb := func(dstPath, file string) (retErr error) {
 		f, err := os.Open(file)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		defer func() {
 			if err := f.Close(); retErr == nil {
 				retErr = err
 			}
 		}()
-		return mf.PutFile(dstPath, f, client.WithDatumPutFile(d.ID))
+		return errors.EnsureStack(mf.PutFile(dstPath, f, client.WithDatumPutFile(d.ID)))
 	}
 	if fi.IsDir() {
 		dir := file
-		return filepath.Walk(dir, func(file string, fi os.FileInfo, err error) error {
+		err := filepath.Walk(dir, func(file string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -473,10 +477,11 @@ func (d *Datum) uploadSymlink(mf client.ModifyFile, dstPath, file string, fi os.
 			}
 			dstSubpath, err := filepath.Rel(dir, file)
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			return cb(path.Join(dstPath, dstSubpath), file)
 		})
+		return errors.EnsureStack(err)
 	}
 	return cb(dstPath, file)
 }
@@ -494,10 +499,10 @@ func NewDeleter(metaFileWalker fileWalkerFunc, metaOutputClient, pfsOutputClient
 		tagOption := client.WithDatumDeleteFile(ID)
 		// Delete the datum directory in the meta output.
 		if err := metaOutputClient.DeleteFile(path.Join(MetaPrefix, ID)+"/", tagOption); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		if err := metaOutputClient.DeleteFile(path.Join(PFSPrefix, ID)+"/", tagOption); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		// Delete the content output by the datum.
 		outputDir := "/" + path.Join(PFSPrefix, ID, OutputPrefix)
@@ -512,10 +517,10 @@ func NewDeleter(metaFileWalker fileWalkerFunc, metaOutputClient, pfsOutputClient
 			// Remove the output directory prefix.
 			file, err := filepath.Rel(outputDir, files[i])
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			if err := pfsOutputClient.DeleteFile(file, tagOption); err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 		}
 		return nil

@@ -32,7 +32,7 @@ func withDebugWriter(w io.Writer, cb func(*tar.Writer) error) (retErr error) {
 	return cb(tw)
 }
 
-func collectDebugFile(tw *tar.Writer, name string, cb func(io.Writer) error, prefix ...string) (retErr error) {
+func collectDebugFile(tw *tar.Writer, name, ext string, cb func(io.Writer) error, prefix ...string) (retErr error) {
 	if len(prefix) > 0 {
 		name = join(prefix[0], name)
 	}
@@ -45,18 +45,22 @@ func collectDebugFile(tw *tar.Writer, name string, cb func(io.Writer) error, pre
 		if err := cb(f); err != nil {
 			return err
 		}
-		return writeTarFile(tw, name, f)
+		fullName := name
+		if ext != "" {
+			fullName += "." + ext
+		}
+		return writeTarFile(tw, fullName, f)
 	})
 }
 
 func writeErrorFile(tw *tar.Writer, err error, prefix ...string) error {
-	file := "error"
+	file := "error.txt"
 	if len(prefix) > 0 {
 		file = join(prefix[0], file)
 	}
 	return fsutil.WithTmpFile("pachyderm_debug", func(f *os.File) error {
 		if _, err := io.Copy(f, strings.NewReader(err.Error()+"\n")); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		return writeTarFile(tw, file, f)
 	})
@@ -74,20 +78,20 @@ func writeTarFile(tw *tar.Writer, name string, f *os.File) error {
 	}
 	_, err = f.Seek(0, 0)
 	if err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	_, err = io.Copy(tw, f)
-	return err
+	return errors.EnsureStack(err)
 }
 
 // TODO: May want to add some buffering in case we error midstream.
 func collectDebugStream(tw *tar.Writer, r io.Reader, prefix ...string) (retErr error) {
 	gr, err := gzip.NewReader(r)
 	if err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	defer func() {
 		if err := gr.Close(); retErr == nil {
@@ -105,17 +109,17 @@ func copyTar(tw *tar.Writer, tr *tar.Reader, prefix ...string) error {
 			if err == io.EOF {
 				return nil
 			}
-			return err
+			return errors.EnsureStack(err)
 		}
 		if len(prefix) > 0 {
 			hdr.Name = join(prefix[0], hdr.Name)
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		_, err = io.Copy(tw, tr)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 }

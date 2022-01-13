@@ -43,7 +43,6 @@ import (
 	ppspretty "github.com/pachyderm/pachyderm/v2/src/server/pps/pretty"
 
 	"github.com/gogo/protobuf/types"
-	globlib "github.com/pachyderm/ohmyglob"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,6 +84,7 @@ func TestSimplePipeline(t *testing.T) {
 	}
 
 	c := tu.GetPachClient(t)
+	c = c.WithDefaultTransformUser("1000")
 	require.NoError(t, c.DeleteAll())
 
 	dataRepo := tu.UniqueString("TestSimplePipeline_data")
@@ -98,7 +98,7 @@ func TestSimplePipeline(t *testing.T) {
 	pipeline := tu.UniqueString("TestSimplePipeline")
 	require.NoError(t, c.CreatePipeline(
 		pipeline,
-		"",
+		tu.DefaultTransformImage,
 		[]string{"bash"},
 		[]string{
 			fmt.Sprintf("cp /pfs/%s/* /pfs/out/", dataRepo),
@@ -2486,34 +2486,34 @@ func TestUpdatePipeline(t *testing.T) {
 	// Confirm that k8s resources have been updated (fix #4071)
 	require.NoErrorWithinTRetry(t, 60*time.Second, func() error {
 		kc := tu.GetKubeClient(t)
-		svcs, err := kc.CoreV1().Services("default").List(metav1.ListOptions{})
+		svcs, err := kc.CoreV1().Services("default").List(context.Background(), metav1.ListOptions{})
 		require.NoError(t, err)
 		var newServiceSeen bool
 		for _, svc := range svcs.Items {
 			switch svc.ObjectMeta.Name {
 			case ppsutil.PipelineRcName(pipelineName, 1):
-				return fmt.Errorf("stale service encountered: %q", svc.ObjectMeta.Name)
+				return errors.Errorf("stale service encountered: %q", svc.ObjectMeta.Name)
 			case ppsutil.PipelineRcName(pipelineName, 2):
 				newServiceSeen = true
 			}
 		}
 		if !newServiceSeen {
-			return fmt.Errorf("did not find new service: %q", ppsutil.PipelineRcName(pipelineName, 2))
+			return errors.Errorf("did not find new service: %q", ppsutil.PipelineRcName(pipelineName, 2))
 		}
-		rcs, err := kc.CoreV1().ReplicationControllers("default").List(metav1.ListOptions{})
+		rcs, err := kc.CoreV1().ReplicationControllers("default").List(context.Background(), metav1.ListOptions{})
 		require.NoError(t, err)
 		var newRCSeen bool
 		for _, rc := range rcs.Items {
 			switch rc.ObjectMeta.Name {
 			case ppsutil.PipelineRcName(pipelineName, 1):
-				return fmt.Errorf("stale RC encountered: %q", rc.ObjectMeta.Name)
+				return errors.Errorf("stale RC encountered: %q", rc.ObjectMeta.Name)
 			case ppsutil.PipelineRcName(pipelineName, 2):
 				newRCSeen = true
 			}
 		}
 		require.True(t, newRCSeen)
 		if !newRCSeen {
-			return fmt.Errorf("did not find new RC: %q", ppsutil.PipelineRcName(pipelineName, 2))
+			return errors.Errorf("did not find new RC: %q", ppsutil.PipelineRcName(pipelineName, 2))
 		}
 		return nil
 	})
@@ -2560,34 +2560,34 @@ func TestUpdatePipeline(t *testing.T) {
 	// Confirm that k8s resources have been updated (fix #4071)
 	require.NoErrorWithinTRetry(t, 60*time.Second, func() error {
 		kc := tu.GetKubeClient(t)
-		svcs, err := kc.CoreV1().Services("default").List(metav1.ListOptions{})
+		svcs, err := kc.CoreV1().Services("default").List(context.Background(), metav1.ListOptions{})
 		require.NoError(t, err)
 		var newServiceSeen bool
 		for _, svc := range svcs.Items {
 			switch svc.ObjectMeta.Name {
 			case ppsutil.PipelineRcName(pipelineName, 1):
-				return fmt.Errorf("stale service encountered: %q", svc.ObjectMeta.Name)
+				return errors.Errorf("stale service encountered: %q", svc.ObjectMeta.Name)
 			case ppsutil.PipelineRcName(pipelineName, 2):
 				newServiceSeen = true
 			}
 		}
 		if !newServiceSeen {
-			return fmt.Errorf("did not find new service: %q", ppsutil.PipelineRcName(pipelineName, 2))
+			return errors.Errorf("did not find new service: %q", ppsutil.PipelineRcName(pipelineName, 2))
 		}
-		rcs, err := kc.CoreV1().ReplicationControllers("default").List(metav1.ListOptions{})
+		rcs, err := kc.CoreV1().ReplicationControllers("default").List(context.Background(), metav1.ListOptions{})
 		require.NoError(t, err)
 		var newRCSeen bool
 		for _, rc := range rcs.Items {
 			switch rc.ObjectMeta.Name {
 			case ppsutil.PipelineRcName(pipelineName, 1):
-				return fmt.Errorf("stale RC encountered: %q", rc.ObjectMeta.Name)
+				return errors.Errorf("stale RC encountered: %q", rc.ObjectMeta.Name)
 			case ppsutil.PipelineRcName(pipelineName, 2):
 				newRCSeen = true
 			}
 		}
 		require.True(t, newRCSeen)
 		if !newRCSeen {
-			return fmt.Errorf("did not find new RC: %q", ppsutil.PipelineRcName(pipelineName, 2))
+			return errors.Errorf("did not find new RC: %q", ppsutil.PipelineRcName(pipelineName, 2))
 		}
 		return nil
 	})
@@ -2894,7 +2894,7 @@ func TestUpdatePipelineRunningJob(t *testing.T) {
 
 		state := jobInfos[1].State
 		if state != pps.JobState_JOB_RUNNING {
-			return fmt.Errorf("wrong state: %v for %s", state, jobInfos[1].Job.ID)
+			return errors.Errorf("wrong state: %v for %s", state, jobInfos[1].Job.ID)
 		}
 
 		state = jobInfos[0].State
@@ -3235,7 +3235,7 @@ func TestStopStandbyPipeline(t *testing.T) {
 		pi, err := c.InspectPipeline(pipeline, false)
 		require.NoError(t, err)
 		if pi.State != pps.PipelineState_PIPELINE_STANDBY {
-			return fmt.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
+			return errors.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
 		}
 		return nil
 	})
@@ -3253,7 +3253,7 @@ func TestStopStandbyPipeline(t *testing.T) {
 		pi, err := c.InspectPipeline(pipeline, false)
 		require.NoError(t, err)
 		if pi.State != pps.PipelineState_PIPELINE_STANDBY {
-			return fmt.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
+			return errors.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
 		}
 		return nil
 	})
@@ -3264,7 +3264,7 @@ func TestStopStandbyPipeline(t *testing.T) {
 		pi, err := c.InspectPipeline(pipeline, false)
 		require.NoError(t, err)
 		if pi.State != pps.PipelineState_PIPELINE_PAUSED {
-			return fmt.Errorf("expected %q to be in PAUSED, but was in %s", pipeline,
+			return errors.Errorf("expected %q to be in PAUSED, but was in %s", pipeline,
 				pi.State)
 		}
 		return nil
@@ -3294,7 +3294,7 @@ func TestStopStandbyPipeline(t *testing.T) {
 		pi, err := c.InspectPipeline(pipeline, false)
 		require.NoError(t, err)
 		if pi.State != pps.PipelineState_PIPELINE_STANDBY {
-			return fmt.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
+			return errors.Errorf("expected %q to be in STANDBY, but was in %s", pipeline, pi.State)
 		}
 		return nil
 	})
@@ -3314,6 +3314,7 @@ func TestPipelineEnv(t *testing.T) {
 	k := tu.GetKubeClient(t)
 	secretName := tu.UniqueString("test-secret")
 	_, err := k.CoreV1().Secrets(v1.NamespaceDefault).Create(
+		context.Background(),
 		&v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: secretName,
@@ -3322,6 +3323,7 @@ func TestPipelineEnv(t *testing.T) {
 				"foo": []byte("foo\n"),
 			},
 		},
+		metav1.CreateOptions{},
 	)
 	require.NoError(t, err)
 	c := tu.GetPachClient(t)
@@ -3989,7 +3991,7 @@ func TestGetLogs(t *testing.T) {
 			require.False(t, strings.Contains(iter.Message().Message, "MISSING"), iter.Message().Message)
 		}
 		if numLogs < 2 {
-			return fmt.Errorf("didn't get enough log lines")
+			return errors.Errorf("didn't get enough log lines")
 		}
 		if err := iter.Err(); err != nil {
 			return err
@@ -4174,7 +4176,7 @@ func TestManyLogs(t *testing.T) {
 			return iter.Err()
 		}
 		if numLogs != logsReceived {
-			return fmt.Errorf("received: %d log lines, expected: %d", logsReceived, numLogs)
+			return errors.Errorf("received: %d log lines, expected: %d", logsReceived, numLogs)
 		}
 		return nil
 	})
@@ -4407,13 +4409,14 @@ func TestSystemResourceRequests(t *testing.T) {
 	for _, app := range []string{"pachd", "etcd"} {
 		err := backoff.Retry(func() error {
 			podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+				context.Background(),
 				metav1.ListOptions{
 					LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
 						map[string]string{"app": app, "suite": "pachyderm"},
 					)),
 				})
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			if len(podList.Items) < 1 {
 				return errors.Errorf("could not find pod for %s", app) // retry
@@ -4483,13 +4486,14 @@ func TestPipelineResourceRequest(t *testing.T) {
 	kubeClient := tu.GetKubeClient(t)
 	require.NoError(t, backoff.Retry(func() error {
 		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+			context.Background(),
 			metav1.ListOptions{
 				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
 					map[string]string{"app": rcName},
 				)),
 			})
 		if err != nil {
-			return err // retry
+			return errors.EnsureStack(err) // retry
 		}
 		if len(podList.Items) != 1 || len(podList.Items[0].Spec.Containers) == 0 {
 			return errors.Errorf("could not find single container for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -4553,13 +4557,15 @@ func TestPipelineResourceLimit(t *testing.T) {
 	rcName := ppsutil.PipelineRcName(pipelineInfo.Pipeline.Name, pipelineInfo.Version)
 	kubeClient := tu.GetKubeClient(t)
 	err = backoff.Retry(func() error {
-		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(metav1.ListOptions{
-			LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
-				map[string]string{"app": rcName, "suite": "pachyderm"},
-			)),
-		})
+		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+			context.Background(),
+			metav1.ListOptions{
+				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
+					map[string]string{"app": rcName, "suite": "pachyderm"},
+				)),
+			})
 		if err != nil {
-			return err // retry
+			return errors.EnsureStack(err) // retry
 		}
 		if len(podList.Items) != 1 || len(podList.Items[0].Spec.Containers) == 0 {
 			return errors.Errorf("could not find single container for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -4617,13 +4623,15 @@ func TestPipelineResourceLimitDefaults(t *testing.T) {
 	rcName := ppsutil.PipelineRcName(pipelineInfo.Pipeline.Name, pipelineInfo.Version)
 	kubeClient := tu.GetKubeClient(t)
 	err = backoff.Retry(func() error {
-		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(metav1.ListOptions{
-			LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
-				map[string]string{"app": rcName, "suite": "pachyderm"},
-			)),
-		})
+		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+			context.Background(),
+			metav1.ListOptions{
+				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
+					map[string]string{"app": rcName, "suite": "pachyderm"},
+				)),
+			})
 		if err != nil {
-			return err // retry
+			return errors.EnsureStack(err) // retry
 		}
 		if len(podList.Items) != 1 || len(podList.Items[0].Spec.Containers) == 0 {
 			return errors.Errorf("could not find single container for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -4755,7 +4763,7 @@ func TestPipelineCrashing(t *testing.T) {
 			}
 		}
 		_, err := c.PpsAPIClient.CreatePipeline(context.Background(), &req)
-		return err
+		return errors.EnsureStack(err)
 	}
 	require.NoError(t, create(true))
 
@@ -4870,13 +4878,15 @@ func TestPodOpts(t *testing.T) {
 		rcName := ppsutil.PipelineRcName(pipelineInfo.Pipeline.Name, pipelineInfo.Version)
 		kubeClient := tu.GetKubeClient(t)
 		err = backoff.Retry(func() error {
-			podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(metav1.ListOptions{
-				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
-					map[string]string{"app": rcName, "suite": "pachyderm"},
-				)),
-			})
+			podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+				context.Background(),
+				metav1.ListOptions{
+					LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
+						map[string]string{"app": rcName, "suite": "pachyderm"},
+					)),
+				})
 			if err != nil {
-				return err // retry
+				return errors.EnsureStack(err) // retry
 			}
 			if len(podList.Items) != 1 || len(podList.Items[0].Spec.Containers) == 0 {
 				return errors.Errorf("could not find single container for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -4930,13 +4940,15 @@ func TestPodOpts(t *testing.T) {
 		rcName := ppsutil.PipelineRcName(pipelineInfo.Pipeline.Name, pipelineInfo.Version)
 		kubeClient := tu.GetKubeClient(t)
 		err = backoff.Retry(func() error {
-			podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(metav1.ListOptions{
-				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
-					map[string]string{"app": rcName, "suite": "pachyderm"},
-				)),
-			})
+			podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+				context.Background(),
+				metav1.ListOptions{
+					LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
+						map[string]string{"app": rcName, "suite": "pachyderm"},
+					)),
+				})
 			if err != nil {
-				return err // retry
+				return errors.EnsureStack(err) // retry
 			}
 			if len(podList.Items) != 1 || len(podList.Items[0].Spec.Containers) == 0 {
 				return errors.Errorf("could not find single container for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -5150,9 +5162,6 @@ func TestGroupInput(t *testing.T) {
 		actual := make([][]string, 0, 3)
 		dis, err := c.ListDatumAll(jobs[0].Job.Pipeline.Name, jobs[0].Job.ID)
 		require.NoError(t, err)
-		sort.Slice(dis, func(i, j int) bool {
-			return dis[i].Data[0].File.Path < dis[j].Data[0].File.Path
-		})
 		for _, di := range dis {
 			sort.Slice(di.Data, func(i, j int) bool { return di.Data[i].File.Path < di.Data[j].File.Path })
 			datumFiles := make([]string, 0)
@@ -5161,6 +5170,9 @@ func TestGroupInput(t *testing.T) {
 			}
 			actual = append(actual, datumFiles)
 		}
+		sort.Slice(actual, func(i, j int) bool {
+			return actual[i][0] < actual[j][0]
+		})
 		require.Equal(t, expected, actual)
 	})
 
@@ -5245,9 +5257,6 @@ func TestGroupInput(t *testing.T) {
 		actual := make([][]string, 0, 3)
 		dis, err := c.ListDatumAll(jobs[0].Job.Pipeline.Name, jobs[0].Job.ID)
 		require.NoError(t, err)
-		sort.Slice(dis, func(i, j int) bool {
-			return dis[i].Data[0].File.Path < dis[j].Data[0].File.Path
-		})
 		for _, di := range dis {
 			sort.Slice(di.Data, func(i, j int) bool { return di.Data[i].File.Path < di.Data[j].File.Path })
 			datumFiles := make([]string, 0)
@@ -5256,6 +5265,9 @@ func TestGroupInput(t *testing.T) {
 			}
 			actual = append(actual, datumFiles)
 		}
+		sort.Slice(actual, func(i, j int) bool {
+			return actual[i][0] < actual[j][0]
+		})
 		require.Equal(t, expected, actual)
 	})
 
@@ -5315,9 +5327,6 @@ func TestGroupInput(t *testing.T) {
 		actual := make([][]string, 0, 2)
 		dis, err := c.ListDatumAll(jobs[0].Job.Pipeline.Name, jobs[0].Job.ID)
 		require.NoError(t, err)
-		sort.Slice(dis, func(i, j int) bool {
-			return dis[i].Data[0].File.Path < dis[j].Data[0].File.Path
-		})
 		for _, di := range dis {
 			sort.Slice(di.Data, func(i, j int) bool { return di.Data[i].File.Path < di.Data[j].File.Path })
 			datumFiles := make([]string, 0)
@@ -5326,6 +5335,9 @@ func TestGroupInput(t *testing.T) {
 			}
 			actual = append(actual, datumFiles)
 		}
+		sort.Slice(actual, func(i, j int) bool {
+			return actual[i][0] < actual[j][0]
+		})
 		require.Equal(t, expected, actual)
 	})
 	t.Run("Symlink", func(t *testing.T) {
@@ -5385,9 +5397,6 @@ func TestGroupInput(t *testing.T) {
 		dis, err := c.ListDatumAll(jobs[0].Job.Pipeline.Name, jobs[0].Job.ID)
 		require.NoError(t, err)
 		// these don't come in a consistent order because group inputs use maps
-		sort.Slice(dis, func(i, j int) bool {
-			return dis[i].Data[0].File.Path < dis[j].Data[0].File.Path
-		})
 		for _, di := range dis {
 			sort.Slice(di.Data, func(i, j int) bool { return di.Data[i].File.Path < di.Data[j].File.Path })
 			datumFiles := make([]string, 0)
@@ -5396,6 +5405,9 @@ func TestGroupInput(t *testing.T) {
 			}
 			actual = append(actual, datumFiles)
 		}
+		sort.Slice(actual, func(i, j int) bool {
+			return actual[i][0] < actual[j][0]
+		})
 		require.Equal(t, expected, actual)
 	})
 }
@@ -6570,7 +6582,7 @@ func TestService(t *testing.T) {
 		var address string
 		kubeClient := tu.GetKubeClient(t)
 		backoff.Retry(func() error {
-			svcs, err := kubeClient.CoreV1().Services("default").List(metav1.ListOptions{})
+			svcs, err := kubeClient.CoreV1().Services("default").List(context.Background(), metav1.ListOptions{})
 			require.NoError(t, err)
 			for _, svc := range svcs.Items {
 				// Pachyderm actually generates two services for pipelineservice: one
@@ -6610,14 +6622,14 @@ func TestService(t *testing.T) {
 	require.NoError(t, backoff.Retry(func() error {
 		resp, err := httpClient.Get(fmt.Sprintf("http://%s/%s/file1", serviceAddr, dataRepo))
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		if resp.StatusCode != 200 {
 			return errors.Errorf("GET returned %d", resp.StatusCode)
 		}
 		content, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		if string(content) != "foo" {
 			return errors.Errorf("wrong content for file1: expected foo, got %s", string(content))
@@ -6681,7 +6693,7 @@ func TestServiceEnvVars(t *testing.T) {
 		var address string
 		kubeClient := tu.GetKubeClient(t)
 		backoff.Retry(func() error {
-			svcs, err := kubeClient.CoreV1().Services("default").List(metav1.ListOptions{})
+			svcs, err := kubeClient.CoreV1().Services("default").List(context.Background(), metav1.ListOptions{})
 			require.NoError(t, err)
 			for _, svc := range svcs.Items {
 				// Pachyderm actually generates two services for pipelineservice: one
@@ -6697,7 +6709,7 @@ func TestServiceEnvVars(t *testing.T) {
 				address = net.JoinHostPort(host, port)
 				return nil
 			}
-			return fmt.Errorf("no matching k8s service found")
+			return errors.Errorf("no matching k8s service found")
 		}, backoff.NewTestingBackOff())
 
 		require.NotEqual(t, "", address)
@@ -6713,14 +6725,14 @@ func TestServiceEnvVars(t *testing.T) {
 		if err != nil {
 			// sleep => don't spam retries. Seems to make test less flaky
 			time.Sleep(time.Second)
-			return err
+			return errors.EnsureStack(err)
 		}
 		if resp.StatusCode != 200 {
-			return fmt.Errorf("GET returned %d", resp.StatusCode)
+			return errors.Errorf("GET returned %d", resp.StatusCode)
 		}
 		envValue, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		return nil
 	})
@@ -8541,13 +8553,14 @@ func TestPodPatchUnmarshalling(t *testing.T) {
 	kubeClient := tu.GetKubeClient(t)
 	require.NoError(t, backoff.Retry(func() error {
 		podList, err := kubeClient.CoreV1().Pods(v1.NamespaceDefault).List(
+			context.Background(),
 			metav1.ListOptions{
 				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
 					map[string]string{"app": rcName},
 				)),
 			})
 		if err != nil {
-			return err // retry
+			return errors.EnsureStack(err) // retry
 		}
 		if len(podList.Items) != 1 || len(podList.Items[0].Spec.Volumes) == 0 {
 			return errors.Errorf("could not find volumes for pipeline %s", pipelineInfo.Pipeline.Name)
@@ -9139,29 +9152,16 @@ func TestDebug(t *testing.T) {
 	dataRepo := tu.UniqueString("TestDebug_data")
 	require.NoError(t, c.CreateRepo(dataRepo))
 
-	expectedFiles := make(map[string]*globlib.Glob)
-	// Record glob patterns for expected pachd files.
-	for _, file := range []string{"version", "logs", "logs-previous**", "goroutine", "heap"} {
-		pattern := path.Join("pachd", "*", "pachd", file)
-		g, err := globlib.Compile(pattern, '/')
-		require.NoError(t, err)
-		expectedFiles[pattern] = g
-	}
-	// Record glob patterns for expected source repo files.
-	for _, file := range []string{"commits", "commits-chart**"} {
-		pattern := path.Join("source-repos", dataRepo, file)
-		g, err := globlib.Compile(pattern, '/')
-		require.NoError(t, err)
-		expectedFiles[pattern] = g
-	}
-	for i := 0; i < 3; i++ {
-		pipeline := tu.UniqueString("TestDebug")
+	expectedFiles, pipelines := tu.DebugFiles(t, dataRepo)
+
+	for _, p := range pipelines {
 		require.NoError(t, c.CreatePipeline(
-			pipeline,
+			p,
 			"",
 			[]string{"bash"},
 			[]string{
 				fmt.Sprintf("cp /pfs/%s/* /pfs/out/", dataRepo),
+				"sleep 15",
 			},
 			&pps.ParallelismSpec{
 				Constant: 1,
@@ -9170,23 +9170,7 @@ func TestDebug(t *testing.T) {
 			"",
 			false,
 		))
-		// Record glob patterns for expected pipeline files.
-		for _, container := range []string{"user", "storage"} {
-			for _, file := range []string{"logs", "logs-previous**", "goroutine", "heap"} {
-				pattern := path.Join("pipelines", pipeline, "pods", "*", container, file)
-				g, err := globlib.Compile(pattern, '/')
-				require.NoError(t, err)
-				expectedFiles[pattern] = g
-			}
-		}
-		for _, file := range []string{"spec", "commits", "jobs", "commits-chart**", "jobs-chart**"} {
-			pattern := path.Join("pipelines", pipeline, file)
-			g, err := globlib.Compile(pattern, '/')
-			require.NoError(t, err)
-			expectedFiles[pattern] = g
-		}
 	}
-
 	commit1, err := c.StartCommit(dataRepo, "master")
 	require.NoError(t, err)
 	require.NoError(t, c.PutFile(commit1, "file", strings.NewReader("foo"), client.WithAppendPutFile()))
@@ -9583,7 +9567,7 @@ func TestRewindCrossPipeline(t *testing.T) {
 				Input:  input,
 				Update: update,
 			})
-		return err
+		return errors.EnsureStack(err)
 	}
 	require.NoError(t, create(false, dataRepo))
 
@@ -9784,7 +9768,7 @@ func TestStandbyTransitions(t *testing.T) {
 		require.NoError(t, err)
 
 		// make sure main pipeline RC has not changed, which it would have if it passed through running
-		rc, err := kc.CoreV1().ReplicationControllers("default").Get(rcName, metav1.GetOptions{})
+		rc, err := kc.CoreV1().ReplicationControllers("default").Get(context.Background(), rcName, metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Equal(t, initialVersion, rc.ResourceVersion)
 	}
@@ -9805,7 +9789,7 @@ func TestStandbyTransitions(t *testing.T) {
 	})
 
 	// get the initial state of the pipeline's RC
-	initialRC, err := kc.CoreV1().ReplicationControllers("default").Get(rcName, metav1.GetOptions{})
+	initialRC, err := kc.CoreV1().ReplicationControllers("default").Get(context.Background(), rcName, metav1.GetOptions{})
 	require.NoError(t, err)
 
 	// stop the pipeline, then verify the RC wasn't modified
@@ -9825,9 +9809,9 @@ func monitorReplicas(t testing.TB, pipeline string, n int) {
 	tooManyReplicas := false
 	require.NoErrorWithinTRetry(t, 180*time.Second, func() error {
 		for {
-			scale, err := kc.CoreV1().ReplicationControllers("default").GetScale(rcName, metav1.GetOptions{})
+			scale, err := kc.CoreV1().ReplicationControllers("default").GetScale(context.Background(), rcName, metav1.GetOptions{})
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			if int(scale.Spec.Replicas) >= n {
 				enoughReplicas = true

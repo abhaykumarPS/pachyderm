@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/pachhash"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 )
 
 // ID uniquely identifies a chunk. It is the hash of its content
@@ -29,7 +29,8 @@ func ParseTrackerID(trackerID string) (ID, error) {
 
 // IDFromHex parses a hex string into an ID
 func IDFromHex(h string) (ID, error) {
-	return hex.DecodeString(h)
+	res, err := hex.DecodeString(h)
+	return res, errors.EnsureStack(err)
 }
 
 func (id ID) String() string {
@@ -68,7 +69,7 @@ type Entry struct {
 // SetupPostgresStoreV0 sets up tables in db
 // DO NOT MODIFY THIS FUNCTION
 // IT HAS BEEN USED IN A RELEASED MIGRATION
-func SetupPostgresStoreV0(tx *sqlx.Tx) error {
+func SetupPostgresStoreV0(tx *pachsql.Tx) error {
 	_, err := tx.Exec(`
 	CREATE TABLE storage.chunk_objects (
 		chunk_id BYTEA NOT NULL,
@@ -98,10 +99,10 @@ type KeyStore interface {
 }
 
 type postgresKeyStore struct {
-	db *sqlx.DB
+	db *pachsql.DB
 }
 
-func NewPostgresKeyStore(db *sqlx.DB) *postgresKeyStore {
+func NewPostgresKeyStore(db *pachsql.DB) *postgresKeyStore {
 	return &postgresKeyStore{
 		db: db,
 	}
@@ -111,13 +112,13 @@ func (s *postgresKeyStore) Create(ctx context.Context, name string, data []byte)
 	_, err := s.db.ExecContext(ctx, `
 	INSERT INTO storage.keys (name, data) VALUES ($1, $2)
 	`, name, data)
-	return err
+	return errors.EnsureStack(err)
 }
 
 func (s *postgresKeyStore) Get(ctx context.Context, name string) ([]byte, error) {
 	var data []byte
 	if err := s.db.GetContext(ctx, &data, `SELECT data FROM storage.keys WHERE name = $1 LIMIT 1`, name); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	return data, nil
 }

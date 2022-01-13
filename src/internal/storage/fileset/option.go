@@ -71,6 +71,13 @@ func WithValidator(validator func(string) error) UnorderedWriterOption {
 	}
 }
 
+// WithCompact sets the unordered writer to compact the created file sets if they exceed the passed in fan in.
+func WithCompact(maxFanIn int) UnorderedWriterOption {
+	return func(uw *UnorderedWriter) {
+		uw.maxFanIn = maxFanIn
+	}
+}
+
 // WriterOption configures a file set writer.
 type WriterOption func(w *Writer)
 
@@ -90,7 +97,7 @@ func WithTTL(ttl time.Duration) WriterOption {
 }
 
 // StorageOptions returns the fileset storage options for the config.
-func StorageOptions(conf *serviceenv.Configuration) []StorageOption {
+func StorageOptions(conf *serviceenv.StorageConfiguration) []StorageOption {
 	var opts []StorageOption
 	if conf.StorageMemoryThreshold > 0 {
 		opts = append(opts, WithMemoryThreshold(conf.StorageMemoryThreshold))

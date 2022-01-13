@@ -5,10 +5,10 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/types"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/pachyderm/pachyderm/v2/src/auth"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/pachyderm/pachyderm/v2/src/internal/uuid"
 	"github.com/pachyderm/pachyderm/v2/src/pfs"
 )
@@ -20,7 +20,7 @@ import (
 type TransactionContext struct {
 	username string
 	// SqlTx is the ongoing database transaction.
-	SqlTx *sqlx.Tx
+	SqlTx *pachsql.Tx
 	// CommitSetID is the ID of the CommitSet corresponding to PFS changes in this transaction.
 	CommitSetID string
 	// Timestamp is the canonical timestamp to be used for writes in this transaction.
@@ -38,12 +38,12 @@ type identifier interface {
 	WhoAmI(context.Context, *auth.WhoAmIRequest) (*auth.WhoAmIResponse, error)
 }
 
-func New(ctx context.Context, sqlTx *sqlx.Tx, authServer identifier) (*TransactionContext, error) {
+func New(ctx context.Context, sqlTx *pachsql.Tx, authServer identifier) (*TransactionContext, error) {
 	var username string
 	// check auth once now so that we can refer to it later
 	if authServer != nil {
 		if me, err := authServer.WhoAmI(ctx, &auth.WhoAmIRequest{}); err != nil && !auth.IsErrNotActivated(err) {
-			return nil, err
+			return nil, errors.EnsureStack(err)
 		} else if err == nil {
 			username = me.Username
 		}
@@ -90,7 +90,7 @@ func (t *TransactionContext) FinishJob(commitInfo *pfs.CommitInfo) {
 // (if all operations complete successfully).  This is used to batch together
 // propagations and dedupe downstream commits in PFS.
 func (t *TransactionContext) PropagateBranch(branch *pfs.Branch) error {
-	return t.PfsPropagater.PropagateBranch(branch)
+	return errors.EnsureStack(t.PfsPropagater.PropagateBranch(branch))
 }
 
 // DeleteBranch removes a branch from the list of branches to propagate, if
@@ -104,22 +104,22 @@ func (t *TransactionContext) DeleteBranch(branch *pfs.Branch) {
 func (t *TransactionContext) Finish() error {
 	if t.PfsPropagater != nil {
 		if err := t.PfsPropagater.Run(); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	if t.PpsPropagater != nil {
 		if err := t.PpsPropagater.Run(); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	if t.PpsJobStopper != nil {
 		if err := t.PpsJobStopper.Run(); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	if t.PpsJobFinisher != nil {
 		if err := t.PpsJobFinisher.Run(); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	return nil

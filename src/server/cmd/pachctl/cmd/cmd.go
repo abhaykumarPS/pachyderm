@@ -35,7 +35,6 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/version"
 	"github.com/pachyderm/pachyderm/v2/src/version/versionpb"
 
-	etcd "github.com/coreos/etcd/clientv3"
 	"github.com/fatih/color"
 	"github.com/gogo/protobuf/types"
 	"github.com/juju/ansiterm"
@@ -350,7 +349,7 @@ Environment variables:
 				// redundantly sent to the info logger. See:
 				// https://godoc.org/google.golang.org/grpc/grpclog#NewLoggerV2
 				logger := log.StandardLogger()
-				etcd.SetLogger(grpclog.NewLoggerV2(
+				grpclog.SetLoggerV2(grpclog.NewLoggerV2(
 					logutil.NewGRPCLogWriter(logger, "etcd/grpc"),
 					ioutil.Discard,
 					ioutil.Discard,
@@ -378,7 +377,7 @@ Environment variables:
 
 			if clientOnly {
 				if raw {
-					return cmdutil.Encoder(output, os.Stdout).EncodeProto(version.Version)
+					return errors.EnsureStack(cmdutil.Encoder(output, os.Stdout).EncodeProto(version.Version))
 				}
 				fmt.Println(version.PrettyPrintVersion(version.Version))
 				return nil
@@ -396,13 +395,13 @@ Environment variables:
 			writer := ansiterm.NewTabWriter(os.Stdout, 20, 1, 3, ' ', 0)
 			if raw {
 				if err := cmdutil.Encoder(output, os.Stdout).EncodeProto(version.Version); err != nil {
-					return err
+					return errors.EnsureStack(err)
 				}
 			} else {
 				printVersionHeader(writer)
 				printVersion(writer, "pachctl", version.Version)
 				if err := writer.Flush(); err != nil {
-					return err
+					return errors.EnsureStack(err)
 				}
 			}
 
@@ -437,10 +436,10 @@ Environment variables:
 
 			// print server version
 			if raw {
-				return cmdutil.Encoder(output, os.Stdout).EncodeProto(version)
+				return errors.EnsureStack(cmdutil.Encoder(output, os.Stdout).EncodeProto(version))
 			}
 			printVersion(writer, "pachd", version)
-			return writer.Flush()
+			return errors.EnsureStack(writer.Flush())
 		}),
 	}
 	versionCmd.Flags().BoolVar(&clientOnly, "client-only", false, "If set, "+
@@ -502,7 +501,7 @@ This resets the cluster to its initial state.`,
 			}
 			c, err := client.PpsAPIClient.ListPipeline(client.Ctx(), &pps.ListPipelineRequest{Details: false})
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			if err := clientsdk.ForEachPipelineInfo(c, func(pi *pps.PipelineInfo) error {
 				pipelines = append(pipelines, red(pi.Pipeline.Name))
@@ -560,7 +559,12 @@ This resets the cluster to its initial state.`,
 				return err
 			}
 			if context.PortForwarders != nil && len(context.PortForwarders) > 0 {
-				return errors.New("port forwarding appears to already be running for this context")
+				fmt.Println("Port forwarding appears to already be running for this context. Running multiple forwarders may not work correctly.")
+				if ok, err := cmdutil.InteractiveConfirm(); err != nil {
+					return err
+				} else if !ok {
+					return nil
+				}
 			}
 
 			fw, err := client.NewPortForwarder(context, namespace)
@@ -663,7 +667,7 @@ This resets the cluster to its initial state.`,
 	portForward.Flags().Uint16Var(&remoteS3gatewayPort, "remote-s3gateway-port", 1600, "The remote port that the s3 gateway is bound to.")
 	portForward.Flags().Uint16Var(&dexPort, "dex-port", 30658, "The local port to bind the identity service to.")
 	portForward.Flags().Uint16Var(&remoteDexPort, "remote-dex-port", 1658, "The local port to bind the identity service to.")
-	portForward.Flags().Uint16Var(&consolePort, "console-port", 34000, "The local port to bind the console service to.")
+	portForward.Flags().Uint16Var(&consolePort, "console-port", 4000, "The local port to bind the console service to.")
 	portForward.Flags().Uint16Var(&remoteConsolePort, "remote-console-port", 4000, "The remote port to bind the console  service to.")
 	portForward.Flags().StringVar(&namespace, "namespace", "", "Kubernetes namespace Pachyderm is deployed in.")
 	subcommands = append(subcommands, cmdutil.CreateAlias(portForward, "port-forward"))
@@ -956,7 +960,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 		t := template.New("top")
 		t.Funcs(templateFuncs)
 		template.Must(t.Parse(text))
-		return t.Execute(cmd.OutOrStderr(), cmd)
+		return errors.EnsureStack(t.Execute(cmd.OutOrStderr(), cmd))
 	})
 }
 

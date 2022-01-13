@@ -85,6 +85,8 @@ release-pachctl:
 	@goreleaser release -p 1 $(GORELSNAP) $(GORELDEBUG) --release-notes=$(CHLOGFILE) --rm-dist -f goreleaser/pachctl.yml
 
 docker-build:
+	docker build -f etc/test-images/Dockerfile.testuser -t pachyderm/testuser:local .
+	docker build -f etc/test-images/Dockerfile.netcat -t pachyderm/ubuntuplusnetcat:local .
 	DOCKER_BUILDKIT=1 goreleaser release -p 1 --snapshot $(GORELDEBUG) --skip-publish --rm-dist -f goreleaser/docker.yml
 
 docker-build-proto:
@@ -123,7 +125,7 @@ docker-push: docker-tag
 	$(SKIP) docker push pachyderm/pachctl:$(VERSION)
 
 docker-push-release: docker-push
-	$(SKIP) docker push pachyderm/etcd:v3.3.5
+	$(SKIP) docker push pachyderm/etcd:v3.5.1
 
 check-kubectl:
 	@# check that kubectl is installed
@@ -180,6 +182,7 @@ launch: install check-kubectl
 
 launch-dev: check-kubectl check-kubectl-connection
 	$(eval STARTTIME := $(shell date +%s))
+	kubectl apply -f etc/testing/minio.yaml --namespace=default
 	helm install pachyderm etc/helm/pachyderm -f etc/helm/examples/local-dev-values.yaml
 	# wait for the pachyderm to come up
 	kubectl wait --for=condition=ready pod -l app=pachd --timeout=5m
@@ -193,15 +196,26 @@ launch-enterprise: check-kubectl check-kubectl-connection
 	kubectl wait --for=condition=ready pod -l app=pach-enterprise --namespace enterprise --timeout=5m
 	@echo "pachd launch took $$(($$(date +%s) - $(STARTTIME))) seconds"
 
+launch-enterprise-member: check-kubectl check-kubectl-connection
+	$(eval STARTTIME := $(shell date +%s))
+	helm install pachyderm etc/helm/pachyderm -f etc/helm/examples/enterprise-member-dev.yaml
+	# wait for the pachyderm to come up
+	kubectl wait --for=condition=ready pod -l app=pachd --timeout=5m
+	@echo "pachd launch took $$(($$(date +%s) - $(STARTTIME))) seconds"
+
 clean-launch: check-kubectl
 	helm delete pachyderm || true
 	helm delete enterprise || true
 	# These resources were not cleaned up by the old pachctl undeploy
 	kubectl delete roles.rbac.authorization.k8s.io,rolebindings.rbac.authorization.k8s.io -l suite=pachyderm
 	kubectl delete clusterroles.rbac.authorization.k8s.io,clusterrolebindings.rbac.authorization.k8s.io -l suite=pachyderm
-	# Helm won't clean statefulset PVCs by design
+	# Helm won't clean statefulset PVCs by design	
 	kubectl delete pvc -l suite=pachyderm
 	kubectl delete pvc -l suite=pachyderm -n enterprise
+	# cleanup minio
+	kubectl delete statefulset -l app=minio -n default
+	kubectl delete service -l app=minio -n default
+	kubectl delete pvc -l app=minio -n default
 
 test-proto-static:
 	./etc/proto/test_no_changes.sh || echo "Protos need to be recompiled; run 'DOCKER_BUILD_FLAGS=--no-cache make proto'."
@@ -315,10 +329,10 @@ launch-stats:
 	kubectl apply --filename etc/kubernetes-prometheus -R
 
 launch-loki:
-	helm repo remove loki || true
-	helm repo add loki https://grafana.github.io/loki/charts
+	helm repo remove grafana || true
+	helm repo add grafana https://grafana.github.io/helm-charts
 	helm repo update
-	helm upgrade --install loki loki/loki-stack
+	helm upgrade --install loki grafana/loki-stack
 	kubectl wait --for=condition=ready pod -l release=loki --timeout=5m
 
 clean-launch-loki:

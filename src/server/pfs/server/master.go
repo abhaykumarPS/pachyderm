@@ -9,8 +9,10 @@ import (
 
 	"github.com/pachyderm/pachyderm/v2/src/internal/backoff"
 	"github.com/pachyderm/pachyderm/v2/src/internal/dlock"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	_ "github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/middleware/auth"
+	"github.com/pachyderm/pachyderm/v2/src/internal/miscutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/pfsdb"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/chunk"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/fileset"
@@ -35,7 +37,7 @@ func (d *driver) master(ctx context.Context) {
 	backoff.RetryUntilCancel(ctx, func() error {
 		masterCtx, err := masterLock.Lock(ctx)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		defer masterLock.Unlock(masterCtx)
 		eg, ctx := errgroup.WithContext(masterCtx)
@@ -49,7 +51,7 @@ func (d *driver) master(ctx context.Context) {
 		eg.Go(func() error {
 			return d.finishCommits(ctx)
 		})
-		return eg.Wait()
+		return errors.EnsureStack(eg.Wait())
 	}, backoff.NewInfiniteBackOff(), func(err error, _ time.Duration) error {
 		log.Errorf("error in pfs master: %v", err)
 		return nil
@@ -57,7 +59,45 @@ func (d *driver) master(ctx context.Context) {
 }
 
 func (d *driver) finishCommits(ctx context.Context) error {
-	return d.commits.ReadOnly(ctx).WatchF(func(ev *watch.Event) error {
+	repos := make(map[string]context.CancelFunc)
+	defer func() {
+		for _, cancel := range repos {
+			cancel()
+		}
+	}()
+	compactor := newCompactor(d.storage, d.env.StorageConfig.StorageCompactionMaxFanIn)
+	err := d.repos.ReadOnly(ctx).WatchF(func(ev *watch.Event) error {
+		if ev.Type == watch.EventError {
+			return ev.Err
+		}
+		key := string(ev.Key)
+		if ev.Type == watch.EventDelete {
+			if cancel, ok := repos[key]; ok {
+				cancel()
+			}
+			delete(repos, key)
+			return nil
+		}
+		if _, ok := repos[key]; ok {
+			return nil
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		repos[key] = cancel
+		go func() {
+			backoff.RetryUntilCancel(ctx, func() error {
+				return d.finishRepoCommits(ctx, compactor, key)
+			}, backoff.NewInfiniteBackOff(), func(err error, d time.Duration) error {
+				log.Errorf("error finishing commits for repo %v: %v, retrying in %v", key, err, d)
+				return nil
+			})
+		}()
+		return nil
+	})
+	return errors.EnsureStack(err)
+}
+
+func (d *driver) finishRepoCommits(ctx context.Context, compactor *compactor, repoKey string) error {
+	err := d.commits.ReadOnly(ctx).WatchByIndexF(pfsdb.CommitsRepoIndex, repoKey, func(ev *watch.Event) error {
 		if ev.Type == watch.EventError {
 			return ev.Err
 		}
@@ -70,67 +110,83 @@ func (d *driver) finishCommits(ctx context.Context) error {
 			return nil
 		}
 		commit := commitInfo.Commit
-		return backoff.RetryUntilCancel(ctx, func() error {
-			id, err := d.getFileSet(ctx, commit)
-			if err != nil {
-				if pfsserver.IsCommitNotFoundErr(err) {
-					return nil
+		return miscutil.LogStep(fmt.Sprintf("finishing commit %v", commit.ID), func() error {
+			// TODO: This retry might not be getting us much if the outer watch still errors due to a transient error.
+			return backoff.RetryUntilCancel(ctx, func() error {
+				id, err := d.getFileSet(ctx, commit)
+				if err != nil {
+					if pfsserver.IsCommitNotFoundErr(err) {
+						return nil
+					}
+					return err
 				}
-				return err
-			}
-			// Compact the commit.
-			start := time.Now()
-			totalId, err := d.compactor.Compact(ctx, []fileset.ID{*id}, defaultTTL)
-			if err != nil {
-				return err
-			}
-			if err := d.commitStore.SetTotalFileSet(ctx, commit, *totalId); err != nil {
-				return err
-			}
-			compactingDuration := time.Since(start)
-			// Validate the commit.
-			start = time.Now()
-			size, validationError, err := d.validate(ctx, totalId)
-			if err != nil {
-				return err
-			}
-			validatingDuration := time.Since(start)
-			// Finish the commit.
-			return d.txnEnv.WithWriteContext(ctx, func(txnCtx *txncontext.TransactionContext) error {
-				commitInfo := &pfs.CommitInfo{}
-				if err := d.commits.ReadWrite(txnCtx.SqlTx).Update(pfsdb.CommitKey(commit), commitInfo, func() error {
-					commitInfo.Finished = txnCtx.Timestamp
-					commitInfo.SizeBytesUpperBound = size
-					if commitInfo.Details == nil {
-						commitInfo.Details = &pfs.CommitInfo_Details{}
+				// Compact the commit.
+				taskDoer := d.env.TaskService.NewDoer(storageTaskNamespace, commit.ID)
+				var totalId *fileset.ID
+				start := time.Now()
+				if err := miscutil.LogStep(fmt.Sprintf("compacting commit %v", commit), func() error {
+					var err error
+					totalId, err = compactor.Compact(ctx, taskDoer, []fileset.ID{*id}, defaultTTL)
+					if err != nil {
+						return err
 					}
-					commitInfo.Details.SizeBytes = size
-					if commitInfo.Error == "" {
-						commitInfo.Error = validationError
-					}
-					commitInfo.Details.CompactingTime = types.DurationProto(compactingDuration)
-					commitInfo.Details.ValidatingTime = types.DurationProto(validatingDuration)
-					return nil
+					return errors.EnsureStack(d.commitStore.SetTotalFileSet(ctx, commit, *totalId))
 				}); err != nil {
 					return err
 				}
-				if commitInfo.Commit.Branch.Repo.Type == pfs.UserRepoType {
-					txnCtx.FinishJob(commitInfo)
-				}
-				if err := d.finishAliasDescendents(txnCtx, commitInfo, *totalId); err != nil {
+				compactingDuration := time.Since(start)
+				// Validate the commit.
+				start = time.Now()
+				var size int64
+				var validationError string
+				if err := miscutil.LogStep(fmt.Sprintf("validating commit %v", commit), func() error {
+					var err error
+					size, validationError, err = d.validate(ctx, totalId)
+					return err
+				}); err != nil {
 					return err
 				}
-				// TODO(2.0 optional): This is a hack to ensure that commits created by triggers have the same ID as the finished commit.
-				// Creating an alias in the branch of the finished commit, then having the trigger alias that commit seems
-				// like a better model.
-				txnCtx.CommitSetID = commitInfo.Commit.ID
-				return d.triggerCommit(txnCtx, commitInfo.Commit)
+				validatingDuration := time.Since(start)
+				// Finish the commit.
+				return miscutil.LogStep(fmt.Sprintf("finish commit %v", commit), func() error {
+					return d.txnEnv.WithWriteContext(ctx, func(txnCtx *txncontext.TransactionContext) error {
+						commitInfo := &pfs.CommitInfo{}
+						if err := d.commits.ReadWrite(txnCtx.SqlTx).Update(pfsdb.CommitKey(commit), commitInfo, func() error {
+							commitInfo.Finished = txnCtx.Timestamp
+							commitInfo.SizeBytesUpperBound = size
+							if commitInfo.Details == nil {
+								commitInfo.Details = &pfs.CommitInfo_Details{}
+							}
+							commitInfo.Details.SizeBytes = size
+							if commitInfo.Error == "" {
+								commitInfo.Error = validationError
+							}
+							commitInfo.Details.CompactingTime = types.DurationProto(compactingDuration)
+							commitInfo.Details.ValidatingTime = types.DurationProto(validatingDuration)
+							return nil
+						}); err != nil {
+							return errors.EnsureStack(err)
+						}
+						if commitInfo.Commit.Branch.Repo.Type == pfs.UserRepoType {
+							txnCtx.FinishJob(commitInfo)
+						}
+						if err := d.finishAliasDescendents(txnCtx, commitInfo, *totalId); err != nil {
+							return err
+						}
+						// TODO(2.0 optional): This is a hack to ensure that commits created by triggers have the same ID as the finished commit.
+						// Creating an alias in the branch of the finished commit, then having the trigger alias that commit seems
+						// like a better model.
+						txnCtx.CommitSetID = commitInfo.Commit.ID
+						return d.triggerCommit(txnCtx, commitInfo.Commit)
+					})
+				})
+			}, backoff.NewInfiniteBackOff(), func(err error, d time.Duration) error {
+				log.Errorf("error finishing commit %v: %v, retrying in %v", commit, err, d)
+				return nil
 			})
-		}, backoff.NewInfiniteBackOff(), func(err error, _ time.Duration) error {
-			log.Errorf("error finishing commit %v: %v", commitInfo.Commit.ID, err)
-			return nil
 		})
 	}, watch.IgnoreDelete)
+	return errors.EnsureStack(err)
 }
 
 // TODO(2.0 optional): Improve the performance of this by doing a logarithmic lookup per new file,
@@ -156,7 +212,7 @@ func (d *driver) validate(ctx context.Context, id *fileset.ID) (int64, string, e
 		size += index.SizeBytes(idx)
 		return nil
 	}); err != nil {
-		return 0, "", err
+		return 0, "", errors.EnsureStack(err)
 	}
 	return size, validationError, nil
 }
@@ -173,7 +229,7 @@ func (d *driver) finishAliasDescendents(txnCtx *txncontext.TransactionContext, p
 		descendents = descendents[1:]
 		commitInfo := &pfs.CommitInfo{}
 		if err := d.commits.ReadWrite(txnCtx.SqlTx).Get(pfsdb.CommitKey(commit), commitInfo); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 
 		if commitInfo.Origin.Kind == pfs.OriginKind_ALIAS {
@@ -184,10 +240,10 @@ func (d *driver) finishAliasDescendents(txnCtx *txncontext.TransactionContext, p
 			commitInfo.Details = parentCommitInfo.Details
 			commitInfo.Error = parentCommitInfo.Error
 			if err := d.commits.ReadWrite(txnCtx.SqlTx).Put(pfsdb.CommitKey(commit), commitInfo); err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			if err := d.commitStore.SetTotalFileSetTx(txnCtx.SqlTx, commitInfo.Commit, id); err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 
 			descendents = append(descendents, commitInfo.ChildCommits...)

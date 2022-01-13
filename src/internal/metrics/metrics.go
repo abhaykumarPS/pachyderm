@@ -157,7 +157,7 @@ func (r *Reporter) reportClusterMetrics() {
 }
 
 func externalMetrics(kubeClient *kube.Clientset, metrics *Metrics) error {
-	nodeList, err := kubeClient.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodeList, err := kubeClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return errors.Wrapf(err, "externalMetrics: unable to retrieve node list from k8s")
 	}
@@ -378,5 +378,4 @@ func (r *Reporter) internalMetrics(metrics *Metrics) {
 		metrics.Bytes = sz
 		metrics.MaxBranches = mbranch
 	}
-	//log.Infof("Metrics logged: %v", metrics)
 }

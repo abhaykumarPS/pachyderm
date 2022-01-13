@@ -62,7 +62,7 @@ var state_2_0_0 migrations.State = migrations.InitialState().
 	}).
 	Apply("create auth schema", func(ctx context.Context, env migrations.Env) error {
 		_, err := env.Tx.ExecContext(ctx, `CREATE SCHEMA auth`)
-		return err
+		return errors.EnsureStack(err)
 	}).
 	Apply("create auth tokens table v0", func(ctx context.Context, env migrations.Env) error {
 		return auth.CreateAuthTokensTable(ctx, env.Tx)
@@ -94,6 +94,9 @@ var state_2_0_0 migrations.State = migrations.InitialState().
 		collections := []col.PostgresCollection{}
 		collections = append(collections, licenseserver.CollectionsV0()...)
 		return col.SetupPostgresCollections(ctx, env.Tx, collections...)
+	}).
+	Apply("add rotation_token_expiry to identity.config table", func(ctx context.Context, env migrations.Env) error {
+		return identity.AddRotationTokenExpiryConfig(ctx, env.Tx)
 	})
 	// DO NOT MODIFY THIS STATE
 	// IT HAS ALREADY SHIPPED IN A RELEASE

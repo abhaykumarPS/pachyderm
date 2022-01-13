@@ -7,11 +7,12 @@ import (
 	"time"
 
 	units "github.com/docker/go-units"
-	"github.com/jmoiron/sqlx"
 	"github.com/pachyderm/pachyderm/v2/src/internal/dbutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/chunk"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/fileset/index"
+	"github.com/pachyderm/pachyderm/v2/src/internal/storage/renew"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/track"
 	"golang.org/x/sync/semaphore"
 )
@@ -30,6 +31,7 @@ const (
 	DefaultCompactionFixedDelay = 1
 	// DefaultCompactionLevelFactor is the default factor that level sizes increase by in a compacted fileset.
 	DefaultCompactionLevelFactor = 10
+	DefaultPrefetchLimit         = 10
 
 	// TrackerPrefix is used for creating tracker objects for filesets
 	TrackerPrefix = "fileset/"
@@ -51,6 +53,7 @@ type Storage struct {
 	memThreshold, shardThreshold int64
 	compactionConfig             *CompactionConfig
 	filesetSem                   *semaphore.Weighted
+	prefetchLimit                int
 }
 
 type CompactionConfig struct {
@@ -69,7 +72,8 @@ func NewStorage(mds MetadataStore, tr track.Tracker, chunks *chunk.Storage, opts
 			FixedDelay:  DefaultCompactionFixedDelay,
 			LevelFactor: DefaultCompactionLevelFactor,
 		},
-		filesetSem: semaphore.NewWeighted(math.MaxInt64),
+		filesetSem:    semaphore.NewWeighted(math.MaxInt64),
+		prefetchLimit: DefaultPrefetchLimit,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -99,8 +103,6 @@ func (s *Storage) newWriter(ctx context.Context, opts ...WriterOption) *Writer {
 	return newWriter(ctx, s, s.tracker, s.chunks, opts...)
 }
 
-// TODO: Expose some notion of read ahead (read a certain number of chunks in parallel).
-// this will be necessary to speed up reading large files.
 func (s *Storage) newReader(fileSet ID, opts ...index.Option) *Reader {
 	return newReader(s.store, s.chunks, fileSet, opts...)
 }
@@ -131,7 +133,7 @@ func (s *Storage) Open(ctx context.Context, ids []ID, opts ...index.Option) (Fil
 // other than ensuring that they exist.
 func (s *Storage) Compose(ctx context.Context, ids []ID, ttl time.Duration) (*ID, error) {
 	var result *ID
-	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *sqlx.Tx) error {
+	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *pachsql.Tx) error {
 		var err error
 		result, err = s.ComposeTx(tx, ids, ttl)
 		return err
@@ -144,7 +146,7 @@ func (s *Storage) Compose(ctx context.Context, ids []ID, ttl time.Duration) (*ID
 // ComposeTx produces a composite fileset from the filesets under ids.
 // It does not perform a merge or check that the filesets at ids in any way
 // other than ensuring that they exist.
-func (s *Storage) ComposeTx(tx *sqlx.Tx, ids []ID, ttl time.Duration) (*ID, error) {
+func (s *Storage) ComposeTx(tx *pachsql.Tx, ids []ID, ttl time.Duration) (*ID, error) {
 	c := &Composite{
 		Layers: idsToHex(ids),
 	}
@@ -153,10 +155,10 @@ func (s *Storage) ComposeTx(tx *sqlx.Tx, ids []ID, ttl time.Duration) (*ID, erro
 
 // CloneTx creates a new fileset, identical to the fileset at id, but with the specified ttl.
 // The ttl can be ignored by using track.NoTTL
-func (s *Storage) CloneTx(tx *sqlx.Tx, id ID, ttl time.Duration) (*ID, error) {
+func (s *Storage) CloneTx(tx *pachsql.Tx, id ID, ttl time.Duration) (*ID, error) {
 	md, err := s.store.GetTx(tx, id)
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	switch x := md.Value.(type) {
 	case *Metadata_Primitive:
@@ -176,7 +178,7 @@ func (s *Storage) Flatten(ctx context.Context, ids []ID) ([]ID, error) {
 	for _, id := range ids {
 		md, err := s.store.Get(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, errors.EnsureStack(err)
 		}
 		switch x := md.Value.(type) {
 		case *Metadata_Primitive:
@@ -245,7 +247,8 @@ func (s *Storage) Drop(ctx context.Context, id ID) error {
 // SetTTL sets the time-to-live for the fileset at id
 func (s *Storage) SetTTL(ctx context.Context, id ID, ttl time.Duration) (time.Time, error) {
 	oid := id.TrackerID()
-	return s.tracker.SetTTL(ctx, oid, ttl)
+	res, err := s.tracker.SetTTL(ctx, oid, ttl)
+	return res, errors.EnsureStack(err)
 }
 
 // SizeUpperBound returns an upper bound for the size of the data in the file set in bytes.
@@ -273,14 +276,14 @@ func (s *Storage) Size(ctx context.Context, id ID) (int64, error) {
 		total += index.SizeBytes(f.Index())
 		return nil
 	}); err != nil {
-		return 0, err
+		return 0, errors.EnsureStack(err)
 	}
 	return total, nil
 }
 
 // WithRenewer calls cb with a Renewer, and a context which will be canceled if the renewer is unable to renew a path.
 func (s *Storage) WithRenewer(ctx context.Context, ttl time.Duration, cb func(context.Context, *Renewer) error) (retErr error) {
-	r := newRenewer(ctx, s.tracker, ttl)
+	r := newRenewer(ctx, s, ttl)
 	defer func() {
 		if err := r.Close(); retErr == nil {
 			retErr = err
@@ -296,14 +299,14 @@ func (s *Storage) GC(ctx context.Context) error {
 
 func (s *Storage) newGC() *track.GarbageCollector {
 	const period = 10 * time.Second
-	tmpDeleter := track.NewTmpDeleter()
+	tmpDeleter := renew.NewTmpDeleter()
 	chunkDeleter := s.chunks.NewDeleter()
 	filesetDeleter := &deleter{
 		store: s.store,
 	}
 	mux := track.DeleterMux(func(id string) track.Deleter {
 		switch {
-		case strings.HasPrefix(id, track.TmpTrackerPrefix):
+		case strings.HasPrefix(id, renew.TmpTrackerPrefix):
 			return tmpDeleter
 		case strings.HasPrefix(id, chunk.TrackerPrefix):
 			return chunkDeleter
@@ -322,14 +325,14 @@ func (s *Storage) exists(ctx context.Context, id ID) (bool, error) {
 		if errors.Is(err, ErrFileSetNotExists) {
 			return false, nil
 		}
-		return false, err
+		return false, errors.EnsureStack(err)
 	}
 	return true, nil
 }
 
 func (s *Storage) newPrimitive(ctx context.Context, prim *Primitive, ttl time.Duration) (*ID, error) {
 	var result *ID
-	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *sqlx.Tx) error {
+	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *pachsql.Tx) error {
 		var err error
 		result, err = s.newPrimitiveTx(tx, prim, ttl)
 		return err
@@ -339,7 +342,7 @@ func (s *Storage) newPrimitive(ctx context.Context, prim *Primitive, ttl time.Du
 	return result, nil
 }
 
-func (s *Storage) newPrimitiveTx(tx *sqlx.Tx, prim *Primitive, ttl time.Duration) (*ID, error) {
+func (s *Storage) newPrimitiveTx(tx *pachsql.Tx, prim *Primitive, ttl time.Duration) (*ID, error) {
 	id := newID()
 	md := &Metadata{
 		Value: &Metadata_Primitive{
@@ -351,17 +354,17 @@ func (s *Storage) newPrimitiveTx(tx *sqlx.Tx, prim *Primitive, ttl time.Duration
 		pointsTo = append(pointsTo, chunkID.TrackerID())
 	}
 	if err := s.store.SetTx(tx, id, md); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	if err := s.tracker.CreateTx(tx, id.TrackerID(), pointsTo, ttl); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	return &id, nil
 }
 
 func (s *Storage) newComposite(ctx context.Context, comp *Composite, ttl time.Duration) (*ID, error) {
 	var result *ID
-	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *sqlx.Tx) error {
+	if err := dbutil.WithTx(ctx, s.store.DB(), func(tx *pachsql.Tx) error {
 		var err error
 		result, err = s.newCompositeTx(tx, comp, ttl)
 		return err
@@ -371,7 +374,7 @@ func (s *Storage) newComposite(ctx context.Context, comp *Composite, ttl time.Du
 	return result, nil
 }
 
-func (s *Storage) newCompositeTx(tx *sqlx.Tx, comp *Composite, ttl time.Duration) (*ID, error) {
+func (s *Storage) newCompositeTx(tx *pachsql.Tx, comp *Composite, ttl time.Duration) (*ID, error) {
 	id := newID()
 	md := &Metadata{
 		Value: &Metadata_Composite{
@@ -387,10 +390,10 @@ func (s *Storage) newCompositeTx(tx *sqlx.Tx, comp *Composite, ttl time.Duration
 		pointsTo = append(pointsTo, id.TrackerID())
 	}
 	if err := s.store.SetTx(tx, id, md); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	if err := s.tracker.CreateTx(tx, id.TrackerID(), pointsTo, ttl); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	return &id, nil
 }
@@ -398,7 +401,7 @@ func (s *Storage) newCompositeTx(tx *sqlx.Tx, comp *Composite, ttl time.Duration
 func (s *Storage) getPrimitive(ctx context.Context, id ID) (*Primitive, error) {
 	md, err := s.store.Get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	prim := md.GetPrimitive()
 	if prim == nil {
@@ -413,7 +416,7 @@ type deleter struct {
 	store MetadataStore
 }
 
-func (d *deleter) DeleteTx(tx *sqlx.Tx, oid string) error {
+func (d *deleter) DeleteTx(tx *pachsql.Tx, oid string) error {
 	if !strings.HasPrefix(oid, TrackerPrefix) {
 		return errors.Errorf("don't know how to delete %v", oid)
 	}
@@ -421,5 +424,5 @@ func (d *deleter) DeleteTx(tx *sqlx.Tx, oid string) error {
 	if err != nil {
 		return err
 	}
-	return d.store.DeleteTx(tx, *id)
+	return errors.EnsureStack(d.store.DeleteTx(tx, *id))
 }

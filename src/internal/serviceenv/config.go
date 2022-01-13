@@ -34,8 +34,8 @@ type GlobalConfiguration struct {
 	PostgresPassword               string `env:"POSTGRES_PASSWORD"`
 	PostgresMaxOpenConns           int    `env:"POSTGRES_MAX_OPEN_CONNS,default=10"`
 	PostgresMaxIdleConns           int    `env:"POSTGRES_MAX_IDLE_CONNS,default=2"`
-	PGBouncerMaxOpenConns          int    `env:"PG_BOUNCER_MAX_OPEN_CONNS,default=100"`
-	PGBouncerMaxIdleConns          int    `env:"PG_BOUNCER_MAX_IDLE_CONNS,default=20"`
+	PGBouncerMaxOpenConns          int    `env:"PG_BOUNCER_MAX_OPEN_CONNS,default=10"`
+	PGBouncerMaxIdleConns          int    `env:"PG_BOUNCER_MAX_IDLE_CONNS,default=2"`
 	PostgresConnMaxLifetimeSeconds int    `env:"POSTGRES_CONN_MAX_LIFETIME_SECONDS,default=0"`
 	PostgresConnMaxIdleSeconds     int    `env:"POSTGRES_CONN_MAX_IDLE_SECONDS,default=0"`
 	PachdServiceHost               string `env:"PACHD_SERVICE_HOST"`
@@ -69,6 +69,9 @@ type GlobalConfiguration struct {
 	// the target project.  If set on a pachd pod, propagates to workers and sidecars (which
 	// also need permission).
 	GoogleCloudProfilerProject string `env:"GOOGLE_CLOUD_PROFILER_PROJECT"`
+
+	// The number of concurrent requests that the PPS Master can make against kubernetes
+	PPSMaxConcurrentK8sRequests int `env:"PPS_MAX_CONCURRENT_K8S_REQUESTS,default=10"`
 }
 
 // PachdFullConfiguration contains the full pachd configuration.
@@ -93,7 +96,8 @@ type PachdSpecificConfiguration struct {
 	WorkerUsesRoot             bool   `env:"WORKER_USES_ROOT,default=false"`
 	RequireCriticalServersOnly bool   `env:"REQUIRE_CRITICAL_SERVERS_ONLY,default=false"`
 	// TODO: Merge this with the worker specific pod name (PPS_POD_NAME) into a global configuration pod name.
-	PachdPodName string `env:"PACHD_POD_NAME,required"`
+	PachdPodName                 string `env:"PACHD_POD_NAME,required"`
+	EnableWorkerSecurityContexts bool   `env:"ENABLE_WORKER_SECURITY_CONTEXTS,default=true"`
 }
 
 // StorageConfiguration contains the storage configuration.

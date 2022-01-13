@@ -15,6 +15,7 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/internal/migrations"
 	"github.com/pachyderm/pachyderm/v2/src/internal/require"
 	"github.com/pachyderm/pachyderm/v2/src/internal/serviceenv"
+	"github.com/pachyderm/pachyderm/v2/src/internal/testetcd"
 	logrus "github.com/sirupsen/logrus"
 
 	dex_storage "github.com/dexidp/dex/storage"
@@ -23,11 +24,13 @@ import (
 
 func getTestEnv(t *testing.T) serviceenv.ServiceEnv {
 	env := &serviceenv.TestServiceEnv{
-		DBClient: dockertestenv.NewTestDB(t),
-		DexDB:    dex_memory.New(logrus.New()),
-		Log:      logrus.New(),
+		DBClient:      dockertestenv.NewTestDB(t),
+		DexDB:         dex_memory.New(logrus.New()),
+		Log:           logrus.New(),
+		EtcdClient:    testetcd.NewEnv(t).EtcdClient,
+		Configuration: serviceenv.NewConfiguration(&serviceenv.PachdFullConfiguration{}),
 	}
-	require.NoError(t, migrations.ApplyMigrations(context.Background(), env.GetDBClient(), migrations.Env{}, clusterstate.DesiredClusterState))
+	require.NoError(t, migrations.ApplyMigrations(context.Background(), env.GetDBClient(), migrations.MakeEnv(nil, env.GetEtcdClient()), clusterstate.DesiredClusterState))
 	require.NoError(t, migrations.BlockUntil(context.Background(), env.GetDBClient(), clusterstate.DesiredClusterState))
 	return env
 }
@@ -37,10 +40,10 @@ func getTestEnv(t *testing.T) serviceenv.ServiceEnv {
 func TestLazyStartWebServer(t *testing.T) {
 	webDir = "../../../../dex-assets"
 	env := getTestEnv(t)
-	api := NewIdentityServer(env, false)
+	api := NewIdentityServer(EnvFromServiceEnv(env), false)
 
 	// server is instantiated but hasn't started
-	server := newDexWeb(env, api)
+	server := newDexWeb(EnvFromServiceEnv(env), api)
 	defer server.stopWebServer()
 
 	// attempt to start the server, no connectors are available so we should get a redirect to a static page
@@ -75,9 +78,9 @@ func TestLazyStartWebServer(t *testing.T) {
 func TestConfigureIssuer(t *testing.T) {
 	webDir = "../../../../dex-assets"
 	env := getTestEnv(t)
-	api := NewIdentityServer(env, false)
+	api := NewIdentityServer(EnvFromServiceEnv(env), false)
 
-	server := newDexWeb(env, api)
+	server := newDexWeb(EnvFromServiceEnv(env), api)
 	defer server.stopWebServer()
 
 	err := env.GetDexDB().CreateConnector(dex_storage.Connector{ID: "conn", Type: "github"})
@@ -111,9 +114,9 @@ func TestConfigureIssuer(t *testing.T) {
 func TestUpdateIDP(t *testing.T) {
 	webDir = "../../../../dex-assets"
 	env := getTestEnv(t)
-	api := NewIdentityServer(env, false)
+	api := NewIdentityServer(EnvFromServiceEnv(env), false)
 
-	server := newDexWeb(env, api)
+	server := newDexWeb(EnvFromServiceEnv(env), api)
 	defer server.stopWebServer()
 
 	// Configure a connector with a given ID
@@ -154,9 +157,9 @@ func TestUpdateIDP(t *testing.T) {
 func TestLogApprovedUsers(t *testing.T) {
 	webDir = "../../../../dex-assets"
 	env := getTestEnv(t)
-	api := NewIdentityServer(env, false)
+	api := NewIdentityServer(EnvFromServiceEnv(env), false)
 
-	server := newDexWeb(env, api)
+	server := newDexWeb(EnvFromServiceEnv(env), api)
 	defer server.stopWebServer()
 
 	err := env.GetDexDB().CreateConnector(dex_storage.Connector{ID: "conn", Type: "github"})

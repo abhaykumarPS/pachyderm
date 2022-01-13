@@ -20,21 +20,25 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
-	"github.com/jmoiron/sqlx"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/pachyderm/pachyderm/v2/src/client"
+	"github.com/pachyderm/pachyderm/v2/src/internal/collection"
 	col "github.com/pachyderm/pachyderm/v2/src/internal/collection"
 	"github.com/pachyderm/pachyderm/v2/src/internal/dbutil"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errutil"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/pachyderm/pachyderm/v2/src/internal/ppsdb"
-	"github.com/pachyderm/pachyderm/v2/src/internal/serviceenv"
 	"github.com/pachyderm/pachyderm/v2/src/internal/tracing"
+	"github.com/pachyderm/pachyderm/v2/src/internal/transactionenv"
+	"github.com/pachyderm/pachyderm/v2/src/internal/transactionenv/txncontext"
 	"github.com/pachyderm/pachyderm/v2/src/pfs"
 	"github.com/pachyderm/pachyderm/v2/src/pps"
+	pfsServer "github.com/pachyderm/pachyderm/v2/src/server/pfs"
 	ppsServer "github.com/pachyderm/pachyderm/v2/src/server/pps"
 )
 
@@ -110,13 +114,13 @@ func GetLimitsResourceList(limits *pps.ResourceSpec) (*v1.ResourceList, error) {
 }
 
 // FailPipeline updates the pipeline's state to failed and sets the failure reason
-func FailPipeline(ctx context.Context, db *sqlx.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, reason string) error {
+func FailPipeline(ctx context.Context, db *pachsql.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, reason string) error {
 	return SetPipelineState(ctx, db, pipelinesCollection, specCommit,
 		nil, pps.PipelineState_PIPELINE_FAILURE, reason)
 }
 
 // CrashingPipeline updates the pipeline's state to crashing and sets the reason
-func CrashingPipeline(ctx context.Context, db *sqlx.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, reason string) error {
+func CrashingPipeline(ctx context.Context, db *pachsql.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, reason string) error {
 	return SetPipelineState(ctx, db, pipelinesCollection, specCommit,
 		nil, pps.PipelineState_PIPELINE_CRASHING, reason)
 }
@@ -175,18 +179,18 @@ func logSetPipelineState(pipeline string, from []pps.PipelineState, to pps.Pipel
 //
 // This function logs a lot for a library function, but it's mostly (maybe
 // exclusively?) called by the PPS master
-func SetPipelineState(ctx context.Context, db *sqlx.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, from []pps.PipelineState, to pps.PipelineState, reason string) (retErr error) {
+func SetPipelineState(ctx context.Context, db *pachsql.DB, pipelinesCollection col.PostgresCollection, specCommit *pfs.Commit, from []pps.PipelineState, to pps.PipelineState, reason string) (retErr error) {
 	pipeline := specCommit.Branch.Repo.Name
 	logSetPipelineState(pipeline, from, to, reason)
 	var resultMessage string
 	var warn bool
-	err := dbutil.WithTx(ctx, db, func(sqlTx *sqlx.Tx) error {
+	err := dbutil.WithTx(ctx, db, func(sqlTx *pachsql.Tx) error {
 		resultMessage = ""
 		warn = false
 		pipelines := pipelinesCollection.ReadWrite(sqlTx)
 		pipelineInfo := &pps.PipelineInfo{}
 		if err := pipelines.Get(specCommit, pipelineInfo); err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 		tracing.TagAnySpan(ctx, "old-state", pipelineInfo.State)
 		// Only UpdatePipeline can bring a pipeline out of failure
@@ -231,7 +235,7 @@ func SetPipelineState(ctx context.Context, db *sqlx.DB, pipelinesCollection col.
 		resultMessage = fmt.Sprintf("SetPipelineState moved pipeline %s from %s to %s", pipeline, pipelineInfo.State, to)
 		pipelineInfo.State = to
 		pipelineInfo.Reason = reason
-		return pipelines.Put(specCommit, pipelineInfo)
+		return errors.EnsureStack(pipelines.Put(specCommit, pipelineInfo))
 	})
 	if resultMessage != "" {
 		if warn {
@@ -303,23 +307,23 @@ func UpdateJobState(pipelines col.PostgresReadWriteCollection, jobs col.ReadWrit
 	if jobInfo.State == pps.JobState_JOB_STARTING && state == pps.JobState_JOB_RUNNING {
 		jobInfo.Started, err = types.TimestampProto(time.Now())
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	} else if pps.IsTerminal(state) {
 		if jobInfo.Started == nil {
 			jobInfo.Started, err = types.TimestampProto(time.Now())
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 		}
 		jobInfo.Finished, err = types.TimestampProto(time.Now())
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 	jobInfo.State = state
 	jobInfo.Reason = reason
-	return jobs.Put(ppsdb.JobKey(jobInfo.Job), jobInfo)
+	return errors.EnsureStack(jobs.Put(ppsdb.JobKey(jobInfo.Job), jobInfo))
 }
 
 func FinishJob(pachClient *client.APIClient, jobInfo *pps.JobInfo, state pps.JobState, reason string) error {
@@ -329,18 +333,18 @@ func FinishJob(pachClient *client.APIClient, jobInfo *pps.JobInfo, state pps.Job
 	// store commit states.
 	_, err := pachClient.RunBatchInTransaction(func(builder *client.TransactionBuilder) error {
 		if _, err := builder.PfsAPIClient.FinishCommit(pachClient.Ctx(), &pfs.FinishCommitRequest{
-			Commit: jobInfo.OutputCommit,
-			Error:  reason,
-			Force:  true,
-		}); err != nil {
-			return err
-		}
-		if _, err := builder.PfsAPIClient.FinishCommit(pachClient.Ctx(), &pfs.FinishCommitRequest{
 			Commit: MetaCommit(jobInfo.OutputCommit),
 			Error:  reason,
 			Force:  true,
 		}); err != nil {
-			return err
+			return errors.EnsureStack(err)
+		}
+		if _, err := builder.PfsAPIClient.FinishCommit(pachClient.Ctx(), &pfs.FinishCommitRequest{
+			Commit: jobInfo.OutputCommit,
+			Error:  reason,
+			Force:  true,
+		}); err != nil {
+			return errors.EnsureStack(err)
 		}
 		return WriteJobInfo(&builder.APIClient, jobInfo)
 	})
@@ -360,7 +364,7 @@ func WriteJobInfo(pachClient *client.APIClient, jobInfo *pps.JobInfo) error {
 		DataRecovered: jobInfo.DataRecovered,
 		Stats:         jobInfo.Stats,
 	})
-	return err
+	return errors.EnsureStack(err)
 }
 
 func MetaCommit(commit *pfs.Commit) *pfs.Commit {
@@ -407,21 +411,55 @@ func ErrorState(s pps.PipelineState) bool {
 // GetWorkerPipelineInfo gets the PipelineInfo proto describing the pipeline that this
 // worker is part of.
 // getPipelineInfo has the side effect of adding auth to the passed pachClient
-func GetWorkerPipelineInfo(pachClient *client.APIClient, env serviceenv.ServiceEnv) (*pps.PipelineInfo, error) {
+func GetWorkerPipelineInfo(pachClient *client.APIClient, db *pachsql.DB, l collection.PostgresListener, pipelineName, specCommitID string) (*pps.PipelineInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pipelines := ppsdb.Pipelines(env.GetDBClient(), env.GetPostgresListener())
+	pipelines := ppsdb.Pipelines(db, l)
 	pipelineInfo := &pps.PipelineInfo{}
 	// Notice we use the SpecCommitID from our env, not from postgres. This is
 	// because the value in postgres might get updated while the worker pod is
 	// being created and we don't want to run the transform of one version of
 	// the pipeline in the image of a different verison.
-	specCommit := client.NewSystemRepo(env.Config().PPSPipelineName, pfs.SpecRepoType).
-		NewCommit("master", env.Config().PPSSpecCommitID)
+	specCommit := client.NewSystemRepo(pipelineName, pfs.SpecRepoType).
+		NewCommit("master", specCommitID)
 	if err := pipelines.ReadOnly(ctx).Get(specCommit, pipelineInfo); err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	pachClient.SetAuthToken(pipelineInfo.AuthToken)
 
 	return pipelineInfo, nil
+}
+
+func FindPipelineSpecCommit(ctx context.Context, pfsServer pfsServer.APIServer, txnEnv transactionenv.TransactionEnv, pipeline string) (*pfs.Commit, error) {
+	var commit *pfs.Commit
+	if err := txnEnv.WithReadContext(ctx, func(txnCtx *txncontext.TransactionContext) (err error) {
+		commit, err = FindPipelineSpecCommitInTransaction(txnCtx, pfsServer, pipeline, "")
+		return
+	}); err != nil {
+		return nil, err
+	}
+	return commit, nil
+}
+
+// FindPipelineSpecCommitInTransaction finds the spec commit corresponding to the pipeline version present in the commit given
+// by startID. If startID is blank, find the current pipeline version
+func FindPipelineSpecCommitInTransaction(txnCtx *txncontext.TransactionContext, pfsServer pfsServer.APIServer, pipeline, startID string) (*pfs.Commit, error) {
+	curr := client.NewSystemRepo(pipeline, pfs.SpecRepoType).NewCommit("master", startID)
+	commitInfo, err := pfsServer.InspectCommitInTransaction(txnCtx,
+		&pfs.InspectCommitRequest{Commit: curr})
+	if err != nil {
+		return nil, errors.EnsureStack(err)
+	}
+	for commitInfo.Origin.Kind != pfs.OriginKind_USER {
+		curr = commitInfo.ParentCommit
+		if curr == nil {
+			return nil, errors.Errorf("spec commit for pipeline %s not found", pipeline)
+		}
+		if commitInfo, err = pfsServer.InspectCommitInTransaction(txnCtx,
+			&pfs.InspectCommitRequest{Commit: curr}); err != nil {
+			return nil, errors.EnsureStack(err)
+		}
+	}
+
+	return curr, nil
 }

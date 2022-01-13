@@ -6,11 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/pachyderm/pachyderm/v2/src/identity"
 	"github.com/pachyderm/pachyderm/v2/src/internal/dbutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
-	"github.com/pachyderm/pachyderm/v2/src/internal/serviceenv"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -64,7 +63,7 @@ var webDir = "/dex-assets"
 type dexWeb struct {
 	sync.RWMutex
 
-	env serviceenv.ServiceEnv
+	env Env
 
 	// Rather than restart the server on every request, we cache it
 	// along with the config and set of connectors. If either of these
@@ -80,12 +79,12 @@ type dexWeb struct {
 	apiServer       identity.APIServer
 }
 
-func newDexWeb(env serviceenv.ServiceEnv, apiServer identity.APIServer) *dexWeb {
+func newDexWeb(env Env, apiServer identity.APIServer) *dexWeb {
 	logger := logrus.WithField("source", "dex-web")
 	return &dexWeb{
 		env:             env,
 		logger:          logger,
-		storageProvider: env.GetDexDB(),
+		storageProvider: env.DexStorage,
 		apiServer:       apiServer,
 	}
 }
@@ -143,15 +142,22 @@ func (w *dexWeb) startWebServer(config *identity.IdentityServerConfig, connector
 	}
 
 	var err error
-	idTokenExpiry := 6 * time.Hour
+	idTokenExpiry := 24 * time.Hour
 
 	if config.IdTokenExpiry != "" {
 		idTokenExpiry, err = time.ParseDuration(config.IdTokenExpiry)
 		if err != nil {
-			return nil, err
+			return nil, errors.EnsureStack(err)
 		}
 	}
 
+	var refreshTokenPolicy *dex_server.RefreshTokenPolicy
+	if config.RotationTokenExpiry != "" {
+		refreshTokenPolicy, err = dex_server.NewRefreshTokenPolicy(w.logger, false, "", config.RotationTokenExpiry, "")
+		if err != nil {
+			return nil, errors.EnsureStack(err)
+		}
+	}
 	serverConfig := dex_server.Config{
 		Storage:            storage,
 		Issuer:             config.Issuer,
@@ -163,14 +169,15 @@ func (w *dexWeb) startWebServer(config *identity.IdentityServerConfig, connector
 			Theme:   "pachyderm",
 			Dir:     webDir,
 		},
-		Logger: w.logger,
+		Logger:             w.logger,
+		RefreshTokenPolicy: refreshTokenPolicy,
 	}
 
 	var ctx context.Context
 	ctx, w.serverCancel = context.WithCancel(context.Background())
 	w.server, err = dex_server.NewServer(ctx, serverConfig)
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	w.currentConfig = config
 	w.currentConnectors = connectors
@@ -184,11 +191,11 @@ func (w *dexWeb) getServer(ctx context.Context) (*dex_server.Server, error) {
 	var server *dex_server.Server
 	config, err := w.apiServer.GetIdentityServerConfig(ctx, &identity.GetIdentityServerConfigRequest{})
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	connectors, err := w.apiServer.ListIDPConnectors(ctx, &identity.ListIDPConnectorsRequest{})
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	// Get a read lock to check if the server needs a restart
 	w.RLock()
@@ -220,7 +227,7 @@ func (w *dexWeb) interceptApproval(server *dex_server.Server) func(http.Response
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if err := dbutil.WithTx(r.Context(), w.env.GetDBClient(), func(tx *sqlx.Tx) error {
+		if err := dbutil.WithTx(r.Context(), w.env.DB, func(tx *pachsql.Tx) error {
 			err := addUserInTx(r.Context(), tx, authReq.Claims.Email)
 			return errors.Wrapf(err, "unable to record user identity for login")
 		}); err != nil {

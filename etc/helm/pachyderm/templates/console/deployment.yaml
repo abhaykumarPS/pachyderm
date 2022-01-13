@@ -27,6 +27,9 @@ spec:
         {{- end }}
       name: console
       namespace: {{ .Release.Namespace }}
+      {{- if .Values.console.annotations }}
+      annotations: {{ toYaml .Values.console.annotations | nindent 4 }}
+      {{- end }}
     spec:
 {{- include "pachyderm.imagePullSecrets" . | indent 6 }}
       containers:
@@ -37,26 +40,66 @@ spec:
         - containerPort: {{ .Values.console.config.graphqlPort }}
           name: console-http
         env:
+        {{- if not .Values.ingress.enabled }}
+        - name: REACT_APP_RUNTIME_SUBSCRIPTIONS_PREFIX
+          value: ":{{ .Values.console.config.graphqlPort }}/graphql"
+        {{- end }}
         - name: ISSUER_URI
-          value: {{ .Values.console.config.issuerURI | quote}}
+          value: {{ include "pachyderm.issuerURI" . | quote}}
         - name: REACT_APP_RUNTIME_ISSUER_URI
-          value: {{ .Values.console.config.reactAppRuntimeIssuerURI | quote }}
+          value: {{ include "pachyderm.reactAppRuntimeIssuerURI" . | quote}}
+        - name: REACT_APP_RUNTIME_DISABLE_TELEMETRY
+          value: {{ .Values.console.config.disableTelemetry | quote}}
         - name: OAUTH_REDIRECT_URI
-          value: {{ .Values.console.config.oauthRedirectURI | quote }}
+          value: {{ include "pachyderm.consoleRedirectURI" . | quote }}
         - name: OAUTH_CLIENT_ID
           value: {{ .Values.console.config.oauthClientID | quote }}
         - name: GRAPHQL_PORT
           value: {{ .Values.console.config.graphqlPort | quote }}
         - name: OAUTH_PACHD_CLIENT_ID
-          value: {{ .Values.console.config.oauthPachdClientID | quote }}
+          value: {{ .Values.pachd.oauthClientID | quote }}
         - name: PACHD_ADDRESS
-          value: {{ .Values.console.config.pachdAddress | quote }}
+          value: {{ include "pachyderm.pachdPeerAddress" . | quote }}
         - name: OAUTH_CLIENT_SECRET
           valueFrom:
             secretKeyRef:
-              name: pachyderm-console-secret
+              name: {{ .Values.console.config.oauthClientSecretSecretName | default "pachyderm-console-secret"}}
               key: OAUTH_CLIENT_SECRET
+        {{- if and .Values.pachd.tls.enabled .Values.global.customCaCerts }}
+        - name: NODE_EXTRA_CA_CERTS
+          value:  /pach-tls/certs/root.crt
+        {{- end }}
+        {{ if .Values.global.proxy }}
+        - name: http_proxy
+          value: {{ .Values.global.proxy }}
+        - name: https_proxy
+          value:  {{.Values.global.proxy}}
+        - name: HTTP_PROXY
+          value:  {{.Values.global.proxy}}
+        - name: HTTPS_PROXY
+          value:  {{.Values.global.proxy}}
+        {{ end }}
+        {{ if .Values.global.noProxy }}
+        - name: no_proxy
+          value:  {{.Values.global.noProxy}}
+        - name: NO_PROXY
+          value:  {{.Values.global.noProxy}}
+        {{ end }}
         {{- if .Values.console.resources }}
         resources: {{ toYaml .Values.console.resources | nindent 10 }}
         {{- end }}
+        volumeMounts:
+        {{- if and .Values.pachd.tls.enabled .Values.global.customCaCerts }}
+        - mountPath: /pach-tls/certs
+          name: pachd-tls-cert
+        {{- end }}
+      volumes:
+      {{- if and .Values.pachd.tls.enabled .Values.global.customCaCerts }}
+      - name: pachd-tls-cert
+        secret:
+          secretName: {{ required "If pachd.tls.enabled, you must set pachd.tls.secretName" .Values.pachd.tls.secretName | quote }}
+          items:
+          - key: tls.crt
+            path: root.crt
+      {{- end }}
 {{ end -}}

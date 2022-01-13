@@ -2,10 +2,10 @@ package auth
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/pachyderm/pachyderm/v2/src/auth"
-	"github.com/pachyderm/pachyderm/v2/src/internal/serviceenv"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	authserver "github.com/pachyderm/pachyderm/v2/src/server/auth"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -121,28 +121,31 @@ var authHandlers = map[string]authHandler{
 	//
 
 	// TODO: Add methods to handle repo permissions
-	"/pfs_v2.API/ActivateAuth":       clusterPermissions(auth.Permission_CLUSTER_AUTH_ACTIVATE),
-	"/pfs_v2.API/CreateRepo":         authDisabledOr(authenticated),
-	"/pfs_v2.API/InspectRepo":        authDisabledOr(authenticated),
-	"/pfs_v2.API/ListRepo":           authDisabledOr(authenticated),
-	"/pfs_v2.API/DeleteRepo":         authDisabledOr(authenticated),
-	"/pfs_v2.API/StartCommit":        authDisabledOr(authenticated),
-	"/pfs_v2.API/FinishCommit":       authDisabledOr(authenticated),
-	"/pfs_v2.API/InspectCommit":      authDisabledOr(authenticated),
-	"/pfs_v2.API/ListCommit":         authDisabledOr(authenticated),
-	"/pfs_v2.API/SubscribeCommit":    authDisabledOr(authenticated),
-	"/pfs_v2.API/ClearCommit":        authDisabledOr(authenticated),
-	"/pfs_v2.API/InspectCommitSet":   authDisabledOr(authenticated),
-	"/pfs_v2.API/ListCommitSet":      authDisabledOr(authenticated),
-	"/pfs_v2.API/SquashCommitSet":    authDisabledOr(authenticated),
-	"/pfs_v2.API/DropCommitSet":      authDisabledOr(authenticated),
-	"/pfs_v2.API/CreateBranch":       authDisabledOr(authenticated),
-	"/pfs_v2.API/InspectBranch":      authDisabledOr(authenticated),
-	"/pfs_v2.API/ListBranch":         authDisabledOr(authenticated),
-	"/pfs_v2.API/DeleteBranch":       authDisabledOr(authenticated),
-	"/pfs_v2.API/ModifyFile":         authDisabledOr(authenticated),
-	"/pfs_v2.API/GetFile":            authDisabledOr(authenticated),
-	"/pfs_v2.API/GetFileTAR":         authDisabledOr(authenticated),
+	"/pfs_v2.API/ActivateAuth":     clusterPermissions(auth.Permission_CLUSTER_AUTH_ACTIVATE),
+	"/pfs_v2.API/CreateRepo":       authDisabledOr(authenticated),
+	"/pfs_v2.API/InspectRepo":      authDisabledOr(authenticated),
+	"/pfs_v2.API/ListRepo":         authDisabledOr(authenticated),
+	"/pfs_v2.API/DeleteRepo":       authDisabledOr(authenticated),
+	"/pfs_v2.API/StartCommit":      authDisabledOr(authenticated),
+	"/pfs_v2.API/FinishCommit":     authDisabledOr(authenticated),
+	"/pfs_v2.API/InspectCommit":    authDisabledOr(authenticated),
+	"/pfs_v2.API/ListCommit":       authDisabledOr(authenticated),
+	"/pfs_v2.API/SubscribeCommit":  authDisabledOr(authenticated),
+	"/pfs_v2.API/ClearCommit":      authDisabledOr(authenticated),
+	"/pfs_v2.API/InspectCommitSet": authDisabledOr(authenticated),
+	"/pfs_v2.API/ListCommitSet":    authDisabledOr(authenticated),
+	"/pfs_v2.API/SquashCommitSet":  authDisabledOr(authenticated),
+	"/pfs_v2.API/DropCommitSet":    authDisabledOr(authenticated),
+	"/pfs_v2.API/CreateBranch":     authDisabledOr(authenticated),
+	"/pfs_v2.API/InspectBranch":    authDisabledOr(authenticated),
+	"/pfs_v2.API/ListBranch":       authDisabledOr(authenticated),
+	"/pfs_v2.API/DeleteBranch":     authDisabledOr(authenticated),
+	"/pfs_v2.API/ModifyFile":       authDisabledOr(authenticated),
+	"/pfs_v2.API/GetFile":          authDisabledOr(authenticated),
+	// TODO: GetFileTAR is unauthenticated for performance reasons. Normal authentication
+	// will be applied internally when a commit is used. When a file set id is used, we lean
+	// on the capability based authentication of file sets.
+	"/pfs_v2.API/GetFileTAR":         unauthenticated,
 	"/pfs_v2.API/InspectFile":        authDisabledOr(authenticated),
 	"/pfs_v2.API/ListFile":           authDisabledOr(authenticated),
 	"/pfs_v2.API/WalkFile":           authDisabledOr(authenticated),
@@ -154,8 +157,10 @@ var authHandlers = map[string]authHandler{
 	"/pfs_v2.API/GetFileSet":         authDisabledOr(authenticated),
 	"/pfs_v2.API/AddFileSet":         authDisabledOr(authenticated),
 	"/pfs_v2.API/RenewFileSet":       authDisabledOr(authenticated),
+	"/pfs_v2.API/ComposeFileSet":     authDisabledOr(authenticated),
 	"/pfs_v2.API/RunLoadTest":        authDisabledOr(authenticated),
 	"/pfs_v2.API/RunLoadTestDefault": authDisabledOr(authenticated),
+	"/pfs_v2.API/CheckStorage":       authDisabledOr(authenticated),
 
 	//
 	// PPS API
@@ -223,9 +228,9 @@ var authHandlers = map[string]authHandler{
 }
 
 // NewInterceptor instantiates a new Interceptor
-func NewInterceptor(env serviceenv.ServiceEnv) *Interceptor {
+func NewInterceptor(getAuthServer func() authserver.APIServer) *Interceptor {
 	return &Interceptor{
-		env: env,
+		getAuthServer: getAuthServer,
 	}
 }
 
@@ -240,11 +245,11 @@ func (s ServerStreamWrapper) Context() context.Context {
 }
 
 func (s ServerStreamWrapper) SetHeader(md metadata.MD) error {
-	return s.stream.SetHeader(md)
+	return errors.EnsureStack(s.stream.SetHeader(md))
 }
 
 func (s ServerStreamWrapper) SendHeader(md metadata.MD) error {
-	return s.stream.SendHeader(md)
+	return errors.EnsureStack(s.stream.SendHeader(md))
 }
 
 func (s ServerStreamWrapper) SetTrailer(md metadata.MD) {
@@ -252,17 +257,17 @@ func (s ServerStreamWrapper) SetTrailer(md metadata.MD) {
 }
 
 func (s ServerStreamWrapper) SendMsg(m interface{}) error {
-	return s.stream.SendMsg(m)
+	return errors.EnsureStack(s.stream.SendMsg(m))
 }
 
 func (s ServerStreamWrapper) RecvMsg(m interface{}) error {
-	return s.stream.RecvMsg(m)
+	return errors.EnsureStack(s.stream.RecvMsg(m))
 }
 
 // Interceptor checks the authentication metadata in unary and streaming RPCs
 // and prevents unknown or unauthorized calls.
 type Interceptor struct {
-	env serviceenv.ServiceEnv
+	getAuthServer func() authserver.APIServer
 }
 
 // InterceptUnary applies authentication rules to unary RPCs
@@ -270,10 +275,10 @@ func (i *Interceptor) InterceptUnary(ctx context.Context, req interface{}, info 
 	a, ok := authHandlers[info.FullMethod]
 	if !ok {
 		logrus.Errorf("no auth function for %q\n", info.FullMethod)
-		return nil, fmt.Errorf("no auth function for %q, this is a bug", info.FullMethod)
+		return nil, errors.Errorf("no auth function for %q, this is a bug", info.FullMethod)
 	}
 
-	username, err := a(ctx, i.env.AuthServer(), info.FullMethod)
+	username, err := a(ctx, i.getAuthServer(), info.FullMethod)
 
 	if err != nil {
 		logrus.WithError(err).Errorf("denied unary call %q to user %v\n", info.FullMethod, nameOrUnauthenticated(username))
@@ -293,10 +298,10 @@ func (i *Interceptor) InterceptStream(srv interface{}, stream grpc.ServerStream,
 	a, ok := authHandlers[info.FullMethod]
 	if !ok {
 		logrus.Errorf("no auth function for %q\n", info.FullMethod)
-		return fmt.Errorf("no auth function for %q, this is a bug", info.FullMethod)
+		return errors.Errorf("no auth function for %q, this is a bug", info.FullMethod)
 	}
 
-	username, err := a(ctx, i.env.AuthServer(), info.FullMethod)
+	username, err := a(ctx, i.getAuthServer(), info.FullMethod)
 
 	if err != nil {
 		logrus.WithError(err).Errorf("denied streaming call %q to user %v\n", info.FullMethod, nameOrUnauthenticated(username))

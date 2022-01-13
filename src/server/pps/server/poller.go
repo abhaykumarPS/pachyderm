@@ -24,7 +24,7 @@ const pollBackoffTime = 2 * time.Second
 func (m *ppsMaster) startPipelinePoller() {
 	m.pollPipelinesMu.Lock()
 	defer m.pollPipelinesMu.Unlock()
-	m.pollCancel = m.startMonitorThread("pollPipelines", m.pollPipelines)
+	m.pollCancel = startMonitorThread(m.masterCtx, "pollPipelines", m.pollPipelines)
 }
 
 func (m *ppsMaster) cancelPipelinePoller() {
@@ -40,7 +40,7 @@ func (m *ppsMaster) cancelPipelinePoller() {
 func (m *ppsMaster) startPipelinePodsPoller() {
 	m.pollPipelinesMu.Lock()
 	defer m.pollPipelinesMu.Unlock()
-	m.pollPodsCancel = m.startMonitorThread("pollPipelinePods", m.pollPipelinePods)
+	m.pollPodsCancel = startMonitorThread(m.masterCtx, "pollPipelinePods", m.pollPipelinePods)
 }
 
 func (m *ppsMaster) cancelPipelinePodsPoller() {
@@ -56,7 +56,7 @@ func (m *ppsMaster) cancelPipelinePodsPoller() {
 func (m *ppsMaster) startPipelineWatcher() {
 	m.pollPipelinesMu.Lock()
 	defer m.pollPipelinesMu.Unlock()
-	m.watchCancel = m.startMonitorThread("watchPipelines", m.watchPipelines)
+	m.watchCancel = startMonitorThread(m.masterCtx, "watchPipelines", m.watchPipelines)
 }
 
 func (m *ppsMaster) cancelPipelineWatcher() {
@@ -91,8 +91,8 @@ func (m *ppsMaster) pollPipelines(ctx context.Context) {
 			// database and querying k8s, then we might delete the RC for brand-new
 			// pipeline 'foo'). Even if we do delete a live pipeline's RC, it'll be
 			// fixed in the next cycle)
-			kc := m.a.env.GetKubeClient().CoreV1().ReplicationControllers(m.a.env.Config().Namespace)
-			rcs, err := kc.List(metav1.ListOptions{
+			kc := m.a.env.KubeClient.CoreV1().ReplicationControllers(m.a.env.Config.Namespace)
+			rcs, err := kc.List(ctx, metav1.ListOptions{
 				LabelSelector: "suite=pachyderm,pipelineName",
 			})
 			if err != nil {
@@ -174,7 +174,8 @@ func (m *ppsMaster) pollPipelines(ctx context.Context) {
 // to CRASHING
 func (m *ppsMaster) pollPipelinePods(ctx context.Context) {
 	if err := backoff.RetryUntilCancel(ctx, backoff.MustLoop(func() error {
-		kubePipelineWatch, err := m.a.env.GetKubeClient().CoreV1().Pods(m.a.namespace).Watch(
+		kubePipelineWatch, err := m.a.env.KubeClient.CoreV1().Pods(m.a.namespace).Watch(
+			ctx,
 			metav1.ListOptions{
 				LabelSelector: metav1.FormatLabelSelector(metav1.SetAsLabelSelector(
 					map[string]string{
@@ -221,7 +222,7 @@ func (m *ppsMaster) pollPipelinePods(ctx context.Context) {
 						&pipelineInfo); err != nil {
 						return errors.Wrapf(err, "couldn't retrieve pipeline information")
 					}
-					return m.a.setPipelineCrashing(ctx, pipelineInfo.SpecCommit, reason)
+					return m.setPipelineCrashing(ctx, pipelineInfo.SpecCommit, reason)
 				}
 				for _, status := range pod.Status.ContainerStatuses {
 					if status.State.Waiting != nil && failures[status.State.Waiting.Reason] {

@@ -42,19 +42,25 @@ func (a *apiServer) ServeSidecarS3G() {
 		apiServer:  a,
 		pachClient: a.env.GetPachClient(context.Background()),
 	}
-	port := a.env.Config().S3GatewayPort
+	port := a.env.Config.S3GatewayPort
 	s.server = s3.Server(port, nil)
 
 	// Read spec commit for this sidecar's pipeline, and set auth token for pach
 	// client
-	specCommit := a.env.Config().PPSSpecCommitID
+	specCommit := a.env.Config.PPSSpecCommitID
 	if specCommit == "" {
 		// This error is not recoverable
 		panic("cannot serve sidecar S3 gateway if no spec commit is set")
 	}
 	if err := backoff.RetryNotify(func() error {
 		var err error
-		s.pipelineInfo, err = ppsutil.GetWorkerPipelineInfo(s.pachClient, a.env)
+		s.pipelineInfo, err = ppsutil.GetWorkerPipelineInfo(
+			s.pachClient,
+			a.env.DB,
+			a.env.Listener,
+			a.env.Config.PPSPipelineName,
+			a.env.Config.PPSSpecCommitID,
+		)
 		return errors.Wrapf(err, "sidecar s3 gateway: could not find pipeline")
 	}, backoff.NewInfiniteBackOff(), func(err error, d time.Duration) error {
 		logrus.Errorf("error starting sidecar s3 gateway: %v; retrying in %d", err, d)
@@ -116,7 +122,7 @@ func (s *sidecarS3G) createK8sServices() {
 	// createK8sServices goes through master election so that only one k8s service
 	// is created per pachyderm job running sidecar s3 gateway
 	backoff.RetryNotify(func() error {
-		masterLock := dlock.NewDLock(s.apiServer.env.GetEtcdClient(),
+		masterLock := dlock.NewDLock(s.apiServer.env.EtcdClient,
 			path.Join(s.apiServer.etcdPrefix,
 				s3gSidecarLockPath,
 				s.pipelineInfo.Pipeline.Name,
@@ -136,7 +142,7 @@ func (s *sidecarS3G) createK8sServices() {
 		// Retry the unlock inside the larger retry as other sidecars may not be
 		// able to obtain mastership until the key expires if unlock is unsuccessful
 		if err := backoff.RetryNotify(func() error {
-			return masterLock.Unlock(ctx)
+			return errors.EnsureStack(masterLock.Unlock(ctx))
 		}, backoff.NewInfiniteBackOff(), func(err error, d time.Duration) error {
 			logrus.Errorf("Error releasing sidecar s3 gateway master lock: %v; retrying in %v", err, d)
 			return nil // always retry
@@ -231,7 +237,7 @@ func (s *k8sServiceCreatingJobHandler) OnCreate(ctx context.Context, jobInfo *pp
 			ClusterIP: "None",
 			Ports: []v1.ServicePort{
 				{
-					Port: int32(s.s.apiServer.env.Config().S3GatewayPort),
+					Port: int32(s.s.apiServer.env.Config.S3GatewayPort),
 					Name: "s3-gateway-port",
 				},
 			},
@@ -239,11 +245,11 @@ func (s *k8sServiceCreatingJobHandler) OnCreate(ctx context.Context, jobInfo *pp
 	}
 
 	err := backoff.RetryNotify(func() error {
-		_, err := s.s.apiServer.env.GetKubeClient().CoreV1().Services(s.s.apiServer.namespace).Create(service)
+		_, err := s.s.apiServer.env.KubeClient.CoreV1().Services(s.s.apiServer.namespace).Create(ctx, service, metav1.CreateOptions{})
 		if err != nil && strings.Contains(err.Error(), "already exists") {
 			return nil // service already created
 		}
-		return err
+		return errors.EnsureStack(err)
 	}, backoff.NewExponentialBackOff(), func(err error, d time.Duration) error {
 		logrus.Errorf("error creating kubernetes service for s3 gateway sidecar: %v; retrying in %v", err, d)
 		return nil
@@ -253,18 +259,19 @@ func (s *k8sServiceCreatingJobHandler) OnCreate(ctx context.Context, jobInfo *pp
 	}
 }
 
-func (s *k8sServiceCreatingJobHandler) OnTerminate(_ context.Context, job *pps.Job) {
+func (s *k8sServiceCreatingJobHandler) OnTerminate(ctx context.Context, job *pps.Job) {
 	if !ppsutil.ContainsS3Inputs(s.s.pipelineInfo.Details.Input) && !s.s.pipelineInfo.Details.S3Out {
 		return // Nothing to delete; this isn't an s3 pipeline (shouldn't happen)
 	}
 	if err := backoff.RetryNotify(func() error {
-		err := s.s.apiServer.env.GetKubeClient().CoreV1().Services(s.s.apiServer.namespace).Delete(
+		err := s.s.apiServer.env.KubeClient.CoreV1().Services(s.s.apiServer.namespace).Delete(
+			ctx,
 			ppsutil.SidecarS3GatewayService(job.Pipeline.Name, job.ID),
-			&metav1.DeleteOptions{OrphanDependents: new(bool) /* false */})
+			metav1.DeleteOptions{OrphanDependents: new(bool) /* false */})
 		if err != nil && errutil.IsNotFoundError(err) {
 			return nil // service already deleted
 		}
-		return err
+		return errors.EnsureStack(err)
 	}, backoff.NewExponentialBackOff(), func(err error, d time.Duration) error {
 		logrus.Errorf("error deleting kubernetes service for s3 %q gateway sidecar: %v; retrying in %v", job, err, d)
 		return nil

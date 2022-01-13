@@ -10,7 +10,7 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/grpcutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/serde"
-	uuid "github.com/satori/go.uuid"
+	"github.com/pachyderm/pachyderm/v2/src/internal/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -126,8 +126,7 @@ func validateCachedConfig() (bool, error) {
 	if cachedConfig.UserID == "" {
 		updated = true
 		log.Debugln("No UserID present in config - generating new one.")
-		uuid := uuid.NewV4()
-		cachedConfig.UserID = uuid.String()
+		cachedConfig.UserID = uuid.NewWithoutDashes()
 	}
 
 	if cachedConfig.V2 == nil {
@@ -253,7 +252,7 @@ func (c *Config) write() error {
 		// using the default config path, create the config directory
 		err = os.MkdirAll(defaultConfigDir, 0755)
 		if err != nil {
-			return err
+			return errors.EnsureStack(err)
 		}
 	}
 
@@ -261,15 +260,15 @@ func (c *Config) write() error {
 	// This ensures the write is atomic on POSIX.
 	tmpfile, err := ioutil.TempFile("", "pachyderm-config-*.json")
 	if err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	defer os.Remove(tmpfile.Name())
 
 	if _, err = tmpfile.Write(rawConfig); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	if err = tmpfile.Close(); err != nil {
-		return err
+		return errors.EnsureStack(err)
 	}
 	if err = os.Rename(tmpfile.Name(), p); err != nil {
 		// A rename could fail if the temporary directory is mounted on a

@@ -4,10 +4,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errutil"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	etcd "go.etcd.io/etcd/client/v3"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -125,7 +125,7 @@ func getWithLimit(c *etcdReadOnlyCollection, key string, limitPtr *int64, opts [
 				atomic.CompareAndSwapInt64(limitPtr, limit, limit/2)
 				continue
 			}
-			return nil, false, err
+			return nil, false, errors.EnsureStack(err)
 		}
 		if len(resp.Kvs) < int(limit) {
 			return resp, true, nil

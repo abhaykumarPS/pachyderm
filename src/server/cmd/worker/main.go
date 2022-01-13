@@ -21,8 +21,8 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/version"
 	"github.com/pachyderm/pachyderm/v2/src/version/versionpb"
 
-	etcd "github.com/coreos/etcd/clientv3"
 	log "github.com/sirupsen/logrus"
+	etcd "go.etcd.io/etcd/client/v3"
 )
 
 func main() {
@@ -44,7 +44,13 @@ func do(config interface{}) error {
 
 	// Construct a client that connects to the sidecar.
 	pachClient := env.GetPachClient(context.Background())
-	pipelineInfo, err := ppsutil.GetWorkerPipelineInfo(pachClient, env) // get pipeline creds for pachClient
+	pipelineInfo, err := ppsutil.GetWorkerPipelineInfo(
+		pachClient,
+		env.GetDBClient(),
+		env.GetPostgresListener(),
+		env.Config().PPSPipelineName,
+		env.Config().PPSSpecCommitID,
+	) // get pipeline creds for pachClient
 	if err != nil {
 		return errors.Wrapf(err, "error getting pipelineInfo")
 	}

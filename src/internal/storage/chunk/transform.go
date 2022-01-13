@@ -11,7 +11,6 @@ import (
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/pachhash"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/kv"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/chacha20"
 )
 
@@ -30,7 +29,7 @@ func Create(ctx context.Context, opts CreateOptions, ptext []byte, createFunc fu
 		return nil, err
 	}
 	buf = buf[:n]
-	// encrypt in place; compress will always make a copy of the data.
+	// encrypt in place; buf is created above.
 	dek := encrypt(opts.Secret, buf, buf)
 	id, err := createFunc(ctx, buf)
 	if err != nil {
@@ -45,16 +44,13 @@ func Create(ctx context.Context, opts CreateOptions, ptext []byte, createFunc fu
 	}, nil
 }
 
-// Get calls getFunc to retrieve a chunk, then verifies, decrypts, and decompresses the data.
+// Get calls client.Get to retrieve a chunk, then verifies, decrypts, and decompresses the data.
 // cb is called with the uncompressed plaintext
-func Get(ctx context.Context, client Client, cache kv.GetPut, ref *Ref, cb kv.ValueCallback) error {
-	if err := getFromCache(ctx, cache, ref, cb); err == nil {
-		return nil
-	}
+func Get(ctx context.Context, client Client, ref *Ref, cb kv.ValueCallback) error {
 	if ref.EncryptionAlgo != EncryptionAlgo_CHACHA20 {
 		return errors.Errorf("unknown encryption algorithm %d", ref.EncryptionAlgo)
 	}
-	return client.Get(ctx, ref.Id, func(ctext []byte) error {
+	err := client.Get(ctx, ref.Id, func(ctext []byte) error {
 		if err := verifyData(ref.Id, ctext); err != nil {
 			return err
 		}
@@ -68,13 +64,11 @@ func Get(ctx context.Context, client Client, cache kv.GetPut, ref *Ref, cb kv.Va
 		}
 		rawData, err := ioutil.ReadAll(r)
 		if err != nil {
-			return err
-		}
-		if err := putInCache(ctx, cache, ref, rawData); err != nil {
-			logrus.Error(err)
+			return errors.EnsureStack(err)
 		}
 		return cb(rawData)
 	})
+	return errors.EnsureStack(err)
 }
 
 // compress attempts to compress src using algo. If the compressed data is bigger
@@ -91,7 +85,7 @@ func compress(algo CompressionAlgo, dst, src []byte) (CompressionAlgo, int, erro
 		err := func() (retErr error) {
 			gw, err := gzip.NewWriterLevel(lw, gzip.BestSpeed)
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
 			defer func() {
 				if err := gw.Close(); retErr == nil {
@@ -100,11 +94,11 @@ func compress(algo CompressionAlgo, dst, src []byte) (CompressionAlgo, int, erro
 			}()
 			_, err = gw.Write(src)
 			if err != nil {
-				return err
+				return errors.EnsureStack(err)
 			}
-			return gw.Close()
+			return errors.EnsureStack(gw.Close())
 		}()
-		if err == io.ErrShortWrite {
+		if errors.Is(err, io.ErrShortWrite) {
 			return compress(CompressionAlgo_NONE, dst, src)
 		}
 		return CompressionAlgo_GZIP_BEST_SPEED, lw.pos, err
@@ -120,7 +114,7 @@ func decompress(algo CompressionAlgo, r io.Reader) (io.Reader, error) {
 	case CompressionAlgo_GZIP_BEST_SPEED:
 		gr, err := gzip.NewReader(r)
 		if err != nil {
-			return nil, err
+			return nil, errors.EnsureStack(err)
 		}
 		return gr, nil
 	default:
@@ -164,7 +158,7 @@ func decrypt(dek []byte, r io.Reader) (io.Reader, error) {
 	nonce := [chacha20.NonceSize]byte{}
 	ciph, err := chacha20.NewUnauthenticatedCipher(dek, nonce[:])
 	if err != nil {
-		return nil, err
+		return nil, errors.EnsureStack(err)
 	}
 	return cipher.StreamReader{S: ciph, R: r}, nil
 }
@@ -202,14 +196,4 @@ func (r *Ref) Key() pachhash.Output {
 		panic(err)
 	}
 	return pachhash.Sum(data)
-}
-
-func getFromCache(ctx context.Context, cache kv.GetPut, ref *Ref, cb kv.ValueCallback) error {
-	key := ref.Key()
-	return cache.Get(ctx, key[:], cb)
-}
-
-func putInCache(ctx context.Context, cache kv.GetPut, ref *Ref, data []byte) error {
-	key := ref.Key()
-	return cache.Put(ctx, key[:], data)
 }

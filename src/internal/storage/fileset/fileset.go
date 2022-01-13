@@ -73,9 +73,29 @@ func parseID(x []byte) (ID, error) {
 	}
 	_, err := hex.Decode(id[:], x)
 	if err != nil {
-		return ID{}, err
+		return ID{}, errors.EnsureStack(err)
 	}
 	return id, nil
+}
+
+func HexStringsToIDs(xs []string) ([]ID, error) {
+	ids := []ID{}
+	for _, x := range xs {
+		id, err := ParseID(x)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, *id)
+	}
+	return ids, nil
+}
+
+func IDsToHexStrings(ids []ID) []string {
+	var xs []string
+	for _, id := range ids {
+		xs = append(xs, id.HexString())
+	}
+	return xs
 }
 
 // PointsTo returns a slice of the chunk.IDs which this fileset immediately points to.

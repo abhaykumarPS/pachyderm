@@ -53,14 +53,17 @@
         "console": {
             "type": "object",
             "properties": {
+                "annotations": {
+                    "type": "object"
+                },
                 "config": {
                     "type": "object",
                     "properties": {
+                        "disableTelemetry": {
+                            "type": "boolean"
+                        },
                         "graphqlPort": {
                             "type": "integer"
-                        },
-                        "issuerURI": {
-                            "type": "string"
                         },
                         "oauthClientID": {
                             "type": "string"
@@ -68,7 +71,7 @@
                         "oauthClientSecret": {
                             "type": "string"
                         },
-                        "oauthPachdClientID": {
+                        "oauthClientSecretSecretName": {
                             "type": "string"
                         },
                         "oauthRedirectURI": {
@@ -125,6 +128,9 @@
             "type": "object",
             "properties": {
                 "affinity": {
+                    "type": "object"
+                },
+                "annotations": {
                     "type": "object"
                 },
                 "clusterDeploymentID": {
@@ -194,6 +200,9 @@
                 "affinity": {
                     "type": "object"
                 },
+                "annotations": {
+                    "type": "object"
+                },
                 "dynamicNodes": {
                     "type": "integer"
                 },
@@ -211,11 +220,25 @@
                         }
                     }
                 },
+                "maxTxnOps": {
+                    "type": "integer"
+                },
+                "nodeSelector": {
+                    "type": "object"
+                },
                 "podLabels": {
                     "type": "object"
                 },
                 "resources": {
                     "type": "object"
+                },
+                "securityContext": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        }
+                    }
                 },
                 "service": {
                     "type": "object",
@@ -236,19 +259,34 @@
                 },
                 "storageSize": {
                     "type": "string"
+                },
+                "tolerations": {
+                    "type": "array"
                 }
             }
         },
         "global": {
             "type": "object",
             "properties": {
+                "customCaCerts": {
+                    "type": "boolean"
+                },
                 "imagePullSecrets": {
                     "type": "array"
+                },
+                "noProxy": {
+                    "type": "string"
                 },
                 "postgresql": {
                     "type": "object",
                     "properties": {
                         "postgresqlDatabase": {
+                            "type": "string"
+                        },
+                        "postgresqlExistingSecretKey": {
+                            "type": "string"
+                        },
+                        "postgresqlExistingSecretName": {
                             "type": "string"
                         },
                         "postgresqlHost": {
@@ -267,6 +305,9 @@
                             "type": "string"
                         }
                     }
+                },
+                "proxy": {
+                    "type": "string"
                 }
             }
         },
@@ -306,30 +347,103 @@
                             "type": "string"
                         }
                     }
+                },
+                "uriHttpsProtoOverride": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "oidc": {
+            "type": "object",
+            "properties": {
+                "IDTokenExpiry": {
+                    "type": "string"
+                },
+                "RotationTokenExpiry": {
+                    "type": "string"
+                },
+                "issuerURI": {
+                    "type": "string"
+                },
+                "mockIDP": {
+                    "type": "boolean"
+                },
+                "requireVerifiedEmail": {
+                    "type": "boolean"
+                },
+                "upstreamIDPs": {
+                    "type": "array"
+                },
+                "upstreamIDPsSecretName": {
+                    "type": "string"
+                },
+                "userAccessibleOauthIssuerHost": {
+                    "type": "string"
                 }
             }
         },
         "pachd": {
             "type": "object",
             "properties": {
+                "activateAuth": {
+                    "type": "boolean"
+                },
+                "activateEnterprise": {
+                    "type": "boolean"
+                },
+                "activateEnterpriseMember": {
+                    "type": "boolean"
+                },
                 "affinity": {
+                    "type": "object"
+                },
+                "annotations": {
                     "type": "object"
                 },
                 "clusterDeploymentID": {
                     "type": "string"
                 },
+                "configJob": {
+                    "type": "object",
+                    "properties": {
+                        "annotations": {
+                            "type": "object"
+                        }
+                    }
+                },
                 "enabled": {
                     "type": "boolean"
                 },
+                "enterpriseCallbackAddress": {
+                    "type": "string"
+                },
                 "enterpriseLicenseKey": {
+                    "type": "string"
+                },
+                "enterpriseLicenseKeySecretName": {
+                    "type": "string"
+                },
+                "enterpriseRootToken": {
+                    "type": "string"
+                },
+                "enterpriseRootTokenSecretName": {
                     "type": "string"
                 },
                 "enterpriseSecret": {
                     "type": "string"
                 },
+                "enterpriseSecretSecretName": {
+                    "type": "string"
+                },
+                "enterpriseServerAddress": {
+                    "type": "string"
+                },
                 "externalService": {
                     "type": "object",
                     "properties": {
+                        "annotations": {
+                            "type": "object"
+                        },
                         "apiGRPCPort": {
                             "type": "integer"
                         },
@@ -361,6 +475,9 @@
                         }
                     }
                 },
+                "localhostIssuer": {
+                    "type": "string"
+                },
                 "logLevel": {
                     "type": "string"
                 },
@@ -378,20 +495,23 @@
                         }
                     }
                 },
-                "mockIDP": {
-                    "type": "boolean"
+                "nodeSelector": {
+                    "type": "object"
                 },
-                "oauthClientId": {
+                "oauthClientID": {
                     "type": "string"
                 },
                 "oauthClientSecret": {
                     "type": "string"
                 },
-                "oauthIssuer": {
+                "oauthClientSecretSecretName": {
                     "type": "string"
                 },
                 "oauthRedirectURI": {
                     "type": "string"
+                },
+                "pachAuthClusterRoleBindings": {
+                    "type": "object"
                 },
                 "podLabels": {
                     "type": "object"
@@ -402,13 +522,13 @@
                 "rbac": {
                     "type": "object",
                     "properties": {
-                        "clusterRBAC": {
-                            "type": "boolean"
-                        },
                         "create": {
                             "type": "boolean"
                         }
                     }
+                },
+                "replicas": {
+                    "type": "integer"
                 },
                 "requireCriticalServersOnly": {
                     "type": "boolean"
@@ -418,6 +538,17 @@
                 },
                 "rootToken": {
                     "type": "string"
+                },
+                "rootTokenSecretName": {
+                    "type": "string"
+                },
+                "securityContext": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        }
+                    }
                 },
                 "service": {
                     "type": "object",
@@ -595,11 +726,8 @@
                         }
                     }
                 },
-                "upstreamIDPs": {
+                "tolerations": {
                     "type": "array"
-                },
-                "userAccessibleOauthIssuerHost": {
-                    "type": "string"
                 },
                 "worker": {
                     "type": "object",
@@ -636,6 +764,12 @@
         "pgbouncer": {
             "type": "object",
             "properties": {
+                "annotations": {
+                    "type": "object"
+                },
+                "maxConnections": {
+                    "type": "integer"
+                },
                 "resources": {
                     "type": "object"
                 },

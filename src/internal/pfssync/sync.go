@@ -7,7 +7,6 @@ import (
 	"path"
 	"syscall"
 
-	"github.com/pachyderm/pachyderm/v2/src/client"
 	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
 	"github.com/pachyderm/pachyderm/v2/src/internal/tarutil"
 	"github.com/pachyderm/pachyderm/v2/src/pfs"
@@ -21,14 +20,14 @@ type Downloader interface {
 }
 
 type downloader struct {
-	pachClient *client.APIClient
+	pachClient *CacheClient
 	pipes      map[string]struct{}
 	eg         *errgroup.Group
 	done       bool
 }
 
 // WithDownloader provides a scoped environment for a Downloader.
-func WithDownloader(pachClient *client.APIClient, cb func(Downloader) error) (retErr error) {
+func WithDownloader(pachClient *CacheClient, cb func(Downloader) error) (retErr error) {
 	d := &downloader{
 		pachClient: pachClient,
 		pipes:      make(map[string]struct{}),
@@ -63,7 +62,7 @@ func (d *downloader) closePipes() (retErr error) {
 		}
 		pipes[path] = f
 	}
-	return d.eg.Wait()
+	return errors.EnsureStack(d.eg.Wait())
 }
 
 type downloadConfig struct {
@@ -112,13 +111,13 @@ func (d *downloader) downloadInfo(storageRoot string, file *pfs.File, config *do
 					if config.headerCallback != nil {
 						hdr, err := f.Header()
 						if err != nil {
-							return err
+							return errors.EnsureStack(err)
 						}
 						if err := config.headerCallback(hdr); err != nil {
 							return err
 						}
 					}
-					return f.Content(w)
+					return errors.EnsureStack(f.Content(w))
 				}, true)
 			})
 		}

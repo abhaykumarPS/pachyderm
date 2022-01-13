@@ -1,40 +1,48 @@
 package chunk
 
 import (
+	"bytes"
 	"context"
 	"time"
 
-	"github.com/jmoiron/sqlx"
+	"github.com/pachyderm/pachyderm/v2/src/internal/errors"
+	"github.com/pachyderm/pachyderm/v2/src/internal/miscutil"
 	"github.com/pachyderm/pachyderm/v2/src/internal/obj"
+	"github.com/pachyderm/pachyderm/v2/src/internal/pachsql"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/kv"
 	"github.com/pachyderm/pachyderm/v2/src/internal/storage/track"
 )
 
 const (
 	// TrackerPrefix is the prefix used when creating tracker objects for chunks
-	TrackerPrefix   = "chunk/"
-	prefix          = "chunk"
-	defaultChunkTTL = 30 * time.Minute
+	TrackerPrefix        = "chunk/"
+	prefix               = "chunk"
+	defaultChunkTTL      = 30 * time.Minute
+	defaultPrefetchLimit = 10
 )
 
 // Storage is the abstraction that manages chunk storage.
 type Storage struct {
-	objClient obj.Client
-	store     kv.Store
-	memCache  kv.GetPut
-	tracker   track.Tracker
-	db        *sqlx.DB
+	objClient     obj.Client
+	db            *pachsql.DB
+	tracker       track.Tracker
+	store         kv.Store
+	memCache      kv.GetPut
+	deduper       *miscutil.WorkDeduper
+	prefetchLimit int
 
 	createOpts CreateOptions
 }
 
 // NewStorage creates a new Storage.
-func NewStorage(objC obj.Client, memCache kv.GetPut, db *sqlx.DB, tracker track.Tracker, opts ...StorageOption) *Storage {
+func NewStorage(objC obj.Client, memCache kv.GetPut, db *pachsql.DB, tracker track.Tracker, opts ...StorageOption) *Storage {
 	s := &Storage{
-		objClient: objC,
-		memCache:  memCache,
-		db:        db,
-		tracker:   tracker,
+		objClient:     objC,
+		db:            db,
+		tracker:       tracker,
+		memCache:      memCache,
+		deduper:       &miscutil.WorkDeduper{},
+		prefetchLimit: defaultPrefetchLimit,
 		createOpts: CreateOptions{
 			Compression: CompressionAlgo_GZIP_BEST_SPEED,
 		},
@@ -49,9 +57,8 @@ func NewStorage(objC obj.Client, memCache kv.GetPut, db *sqlx.DB, tracker track.
 
 // NewReader creates a new Reader.
 func (s *Storage) NewReader(ctx context.Context, dataRefs []*DataRef, opts ...ReaderOption) *Reader {
-	// using the empty string for the tmp id to disable the renewer
-	client := NewClient(s.store, s.db, s.tracker, "")
-	return newReader(ctx, client, s.memCache, dataRefs, opts...)
+	client := NewClient(s.store, s.db, s.tracker, nil)
+	return newReader(ctx, client, s.memCache, s.deduper, s.prefetchLimit, dataRefs, opts...)
 }
 
 // NewWriter creates a new Writer for a stream of bytes to be chunked.
@@ -61,18 +68,50 @@ func (s *Storage) NewWriter(ctx context.Context, name string, cb WriterCallback,
 	if name == "" {
 		panic("name must not be empty")
 	}
-	client := NewClient(s.store, s.db, s.tracker, name)
-	return newWriter(ctx, client, s.memCache, s.createOpts, cb, opts...)
+	client := NewClient(s.store, s.db, s.tracker, NewRenewer(ctx, s.tracker, name, defaultChunkTTL))
+	return newWriter(ctx, client, s.memCache, s.deduper, s.createOpts, cb, opts...)
 }
 
 // List lists all of the chunks in object storage.
 func (s *Storage) List(ctx context.Context, cb func(id ID) error) error {
-	return s.store.Walk(ctx, nil, func(key []byte) error {
+	return errors.EnsureStack(s.store.Walk(ctx, nil, func(key []byte) error {
 		return cb(ID(key))
-	})
+	}))
 }
 
 // NewDeleter creates a deleter for use with a tracker.GC
 func (s *Storage) NewDeleter() track.Deleter {
 	return &deleter{}
+}
+
+// Check runs an integrity check on the objects in object storage.
+// It will check objects for chunks with IDs in the range [first, last)
+// As a special case: if len(end) == 0 then it is ignored.
+func (s *Storage) Check(ctx context.Context, begin, end []byte, readChunks bool) (int, error) {
+	c := NewClient(s.store, s.db, s.tracker, nil).(*trackedClient)
+	first := append([]byte{}, begin...)
+	var count int
+	for {
+		n, last, err := c.CheckEntries(ctx, first, 100, readChunks)
+		count += n
+		if err != nil {
+			return count, err
+		}
+		if last == nil {
+			break
+		}
+		if len(end) > 0 && bytes.Compare(last, end) > 0 {
+			break
+		}
+		first = keyAfter(last)
+	}
+	return count, nil
+}
+
+// keyAfter returns a byte slice ordered immediately after x lexicographically
+// the motivating use case is iteration.
+func keyAfter(x []byte) []byte {
+	y := append([]byte{}, x...)
+	y = append(y, 0x00)
+	return y
 }
