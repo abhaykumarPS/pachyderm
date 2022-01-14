@@ -57,7 +57,7 @@ protoc \
     --plugin=protoc-gen-pach="${GOPATH}/bin/protoc-gen-pach" \
     "-I${GOPATH}/pkg/mod/github.com/gogo/protobuf@${GOGO_PROTO_VERSION}" \
     --pach_out="../v2/src" \
-    $(find . -name "*.proto") > /dev/stderr
+    "$(find . -name '*.proto')" > /dev/stderr
 
 popd > /dev/stderr
 

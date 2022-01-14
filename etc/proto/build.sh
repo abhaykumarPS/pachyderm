@@ -1,6 +1,6 @@
 #!/bin/bash
 # This script build protos using the pachyderm_proto image.
 
-tar cf - $(find src -name "*.proto") $(find etc/proto/pachgen) \
+tar cf - "$(find src -name '*.proto')" "$(find etc/proto/pachgen)" \
  | docker run -i pachyderm_proto \
  | tar xf -
