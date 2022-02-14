@@ -397,7 +397,9 @@ spellcheck:
 
 check-buckets:
 	./etc/testing/circle/check_buckets.sh
-
+.PHONY: build-push-image
+build-push-image:
+	$(DOCKER) buildx build  --platform linux/arm64,linux/amd64 -t abhay900/pachyderm:latest -f etc/proto/Dockerfile --push .
 .PHONY: \
 	install \
 	install-clean \
