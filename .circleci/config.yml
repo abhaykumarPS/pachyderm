@@ -79,6 +79,12 @@ jobs:
           path: /tmp/test-results
       - store_artifacts:
           path: /tmp/test-results
+      - run:
+          mkdir -vp ~/.docker/cli-plugins/
+          curl --silent -L --output ~/.docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.6.3/buildx-v0.6.3.linux-amd64
+          chmod a+x ~/.docker/cli-plugins/docker-buildx
+          docker run -it --rm --privileged tonistiigi/binfmt --install all
+          make build-push-image
   helm-build:
     docker:
       - image: circleci/golang:1.15
